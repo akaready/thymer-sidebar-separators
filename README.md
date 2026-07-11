@@ -4,7 +4,7 @@ Adds movable, theme-colored separators to Thymer's collections list.
 
 For sidebar visibility, spacing, and behavior options, see <a href="../sidebar-tweaks/" target="_blank" rel="noopener noreferrer">Sidebar Tweaks</a>.
 
-Open `Plugin: Sidebar Seperators` from the command palette, then use the panel
+Open `Plugin: Sidebar Separators` from the command palette, then use the panel
 button to create a separator. Newly-created separators immediately enter edit
 mode, and the active separator is outlined in the sidebar while the panel is
 open. Use the pencil and trash buttons that appear on separator hover to switch
