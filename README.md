@@ -1,4 +1,4 @@
-# Sidebar Seperators
+# Sidebar Separators
 
 Adds movable, theme-colored separators to Thymer's collections list.
 
