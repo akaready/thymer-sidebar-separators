@@ -2354,17 +2354,19 @@ var plugins = (() => {
   __name(pingActive, "pingActive");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.0.1";
-  var PLUGIN_KEY = "sidebarSeperators";
-  var MARK_ATTR = "data-plg-sidebar-seperator";
-  var PANEL_CLASS = "plg-sidebar-seperators-panel";
+  var PLUGIN_VERSION = "1.1.1";
+  var PLUGIN_KEY = "sidebarSeparators";
+  var MARK_ATTR = "data-plg-sidebar-separator";
+  var LEGACY_PLUGIN_KEY = "sidebarSeperators";
+  var LEGACY_MARK_ATTR = "data-plg-sidebar-seperator";
+  var PANEL_CLASS = "plg-sidebar-separators-panel";
   var COLLECTION_COLORS_CLASS = "plg-collection-colors";
-  var PANEL_TYPE = "sidebar-seperators-settings";
-  var STYLE_ID2 = "plg-sidebar-seperators-runtime-style";
-  var ACTION_BUTTON_CLASS = "plg-sidebar-seperators-action-button";
-  var EDIT_BUTTON_CLASS = "plg-sidebar-seperators-edit-button";
-  var DELETE_BUTTON_CLASS = "plg-sidebar-seperators-delete-button";
-  var ACTION_OVERLAY_CLASS = "plg-sidebar-seperators-action-overlay";
+  var PANEL_TYPE = "sidebar-separators-settings";
+  var STYLE_ID2 = "plg-sidebar-separators-runtime-style";
+  var ACTION_BUTTON_CLASS = "plg-sidebar-separators-action-button";
+  var EDIT_BUTTON_CLASS = "plg-sidebar-separators-edit-button";
+  var DELETE_BUTTON_CLASS = "plg-sidebar-separators-delete-button";
+  var ACTION_OVERLAY_CLASS = "plg-sidebar-separators-action-overlay";
   var ROOT_SELECTOR = ".sidebar--icons, .sidebar";
   var COLLECTION_ROW_SELECTOR = ".sidebar-item-collection[data-guid]";
   var OUTSIDE_HOLD_MS = 3e3;
@@ -2628,8 +2630,8 @@ var plugins = (() => {
     /** @type {number | null} */
     _appearanceRaf = null;
     onLoad() {
-      pingInstall("sidebar-seperators");
-      pingActive("sidebar-seperators");
+      pingInstall("sidebar-separators");
+      pingActive("sidebar-separators");
       this._defaultStyle = this._normalizeStyle(DEFAULT_STYLE);
       this._activeOverrideGuid = null;
       this._editingPresetId = null;
@@ -2644,13 +2646,13 @@ var plugins = (() => {
       this._refreshThemeColors(true);
       this._writeRuntimeStyle();
       this._settingsCommand = this.ui.addCommandPaletteCommand({
-        label: "Plugin: Sidebar Seperators",
+        label: "Plugin: Sidebar Separators",
         icon: "settings",
         onSelected: /* @__PURE__ */ __name(() => this._openPanel(), "onSelected")
       });
       this.ui.registerCustomPanelType(PANEL_TYPE, (pluginPanel) => {
         try {
-          pluginPanel.setTitle("Sidebar Seperators Settings");
+          pluginPanel.setTitle("Sidebar Separators Settings");
         } catch {
         }
         const root = pluginPanel.getElement();
@@ -2742,7 +2744,7 @@ var plugins = (() => {
       this._hideHoverActionOverlay();
       this._hideActiveActionOverlay();
       document.querySelectorAll(`[${MARK_ATTR}]`).forEach((node) => node.removeAttribute(MARK_ATTR));
-      document.querySelectorAll(`.plg-sidebar-seperators-poof, .plg-sidebar-seperators-hold, .${ACTION_BUTTON_CLASS}, .${ACTION_OVERLAY_CLASS}`).forEach((node) => node.remove());
+      document.querySelectorAll(`.plg-sidebar-separators-poof, .plg-sidebar-separators-hold, .${ACTION_BUTTON_CLASS}, .${ACTION_OVERLAY_CLASS}`).forEach((node) => node.remove());
       const style = document.getElementById(STYLE_ID2);
       if (style) style.remove();
       this._panelEl = null;
@@ -2765,19 +2767,23 @@ var plugins = (() => {
       }
       conf.name = SEPARATOR_COLLECTION_NAME;
       conf.icon = "layout-list";
-      conf.description = "Sidebar separator created by Sidebar Seperators.";
+      conf.description = "Sidebar separator created by Sidebar Separators.";
       conf.show_cmdpal_items = false;
       conf.show_sidebar_items = false;
       conf.home = false;
+      const newMarker = {
+        isSeparator: true,
+        version: 1,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        style: this._normalizeStyle(this._defaultStyle),
+        collapsedStyle: this._normalizeStyle(this._defaultStyle)
+      };
       conf.custom = {
         ...conf.custom || {},
-        [PLUGIN_KEY]: {
-          isSeparator: true,
-          version: 1,
-          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-          style: this._normalizeStyle(this._defaultStyle),
-          collapsedStyle: this._normalizeStyle(this._defaultStyle)
-        }
+        [PLUGIN_KEY]: newMarker,
+        // Mirror under the pre-rename key so an older Collection Colors build (which reads
+        // the marker to hide separators from its list) still recognises this collection.
+        [LEGACY_PLUGIN_KEY]: newMarker
       };
       try {
         await collection.saveConfiguration(conf);
@@ -2827,7 +2833,7 @@ var plugins = (() => {
         h(
           "div",
           { class: `${PANEL_CLASS}__top-actions` },
-          h("button", { type: "button", class: `${PANEL_CLASS}__primary`, onClick: /* @__PURE__ */ __name(() => this._addSeparator(), "onClick") }, "Add New Seperator"),
+          h("button", { type: "button", class: `${PANEL_CLASS}__primary`, onClick: /* @__PURE__ */ __name(() => this._addSeparator(), "onClick") }, "Add New Separator"),
           this._renderPresetChips()
         ),
         this._sidebarPreview(activeStyle, selected)
@@ -2836,7 +2842,7 @@ var plugins = (() => {
         body.push(h(
           "div",
           { class: `${PANEL_CLASS}__empty-state` },
-          h("p", { class: `${PANEL_CLASS}__helper` }, "Select an existing sidebar seperator's pencil icon while this panel is open to edit it, or use Add New Seperator above.")
+          h("p", { class: `${PANEL_CLASS}__helper` }, "Select an existing sidebar separator's pencil icon while this panel is open to edit it, or use Add New Separator above.")
         ));
       } else {
         body.push(this._renderDesignSection(selected));
@@ -3150,12 +3156,23 @@ var plugins = (() => {
       return h("div", { class: `${PANEL_CLASS}__colors`, dataset: { scope } }, field);
     }
     _customSwatchesKey() {
+      return `sidebar-separators/${this.getWorkspaceGuid()}/custom-swatches`;
+    }
+    _legacyCustomSwatchesKey() {
       return `sidebar-seperators/${this.getWorkspaceGuid()}/custom-swatches`;
     }
     /** @returns {string[]} */
     _loadCustomSwatches() {
       try {
-        const raw = JSON.parse(localStorage.getItem(this._customSwatchesKey()) || "[]");
+        let stored = localStorage.getItem(this._customSwatchesKey());
+        if (stored === null) {
+          const legacy = localStorage.getItem(this._legacyCustomSwatchesKey());
+          if (legacy !== null) {
+            localStorage.setItem(this._customSwatchesKey(), legacy);
+            stored = legacy;
+          }
+        }
+        const raw = JSON.parse(stored || "[]");
         return Array.isArray(raw) ? raw.filter((s) => this._isHex(s)).map((s) => s.toLowerCase()).slice(0, 44) : [];
       } catch {
         return [];
@@ -3295,7 +3312,7 @@ var plugins = (() => {
     _lineElement(className, style) {
       const line = h("span", {
         class: className,
-        "data-plg-sidebar-seperators-style": style.borderStyle,
+        "data-plg-sidebar-separators-style": style.borderStyle,
         "aria-hidden": "true"
       });
       this._applyStyleVars(line, style);
@@ -3375,7 +3392,9 @@ var plugins = (() => {
           name: SEPARATOR_COLLECTION_NAME,
           custom: {
             ...custom,
-            [PLUGIN_KEY]: nextMarker
+            [PLUGIN_KEY]: nextMarker,
+            [LEGACY_PLUGIN_KEY]: nextMarker
+            // keep the pre-rename key in step (see top of file)
           }
         });
         if (JSON.stringify(this._pendingSeparatorStyles.get(guid) || null) === JSON.stringify(savedStyle)) {
@@ -3394,11 +3413,20 @@ var plugins = (() => {
      */
     _readMarker(conf) {
       const custom = conf && conf.custom && typeof conf.custom === "object" ? conf.custom : {};
-      const marker = custom[PLUGIN_KEY];
+      const marker = custom[PLUGIN_KEY] || custom[LEGACY_PLUGIN_KEY];
       return marker && marker.isSeparator === true ? marker : null;
     }
     /* ── Presets ─────────────────────────────────────────────────────────── */
     _presetsKey() {
+      let ws = "";
+      try {
+        ws = this.getWorkspaceGuid ? this.getWorkspaceGuid() || "" : "";
+      } catch {
+        ws = "";
+      }
+      return `plg-sidebar-separators-presets:${ws || "default"}`;
+    }
+    _legacyPresetsKey() {
       let ws = "";
       try {
         ws = this.getWorkspaceGuid ? this.getWorkspaceGuid() || "" : "";
@@ -3411,7 +3439,14 @@ var plugins = (() => {
     _loadPresets() {
       let raw = null;
       try {
-        const stored = localStorage.getItem(this._presetsKey());
+        let stored = localStorage.getItem(this._presetsKey());
+        if (stored === null) {
+          const legacy = localStorage.getItem(this._legacyPresetsKey());
+          if (legacy !== null) {
+            localStorage.setItem(this._presetsKey(), legacy);
+            stored = legacy;
+          }
+        }
         if (stored) raw = JSON.parse(stored);
       } catch {
       }
@@ -3419,7 +3454,10 @@ var plugins = (() => {
         try {
           const conf = this.getConfiguration ? this.getConfiguration() : null;
           const custom = conf && conf.custom && typeof conf.custom === "object" ? conf.custom : null;
-          if (custom && Array.isArray(custom.sidebarSeperatorPresets)) raw = custom.sidebarSeperatorPresets;
+          if (custom) {
+            if (Array.isArray(custom.sidebarSeparatorPresets)) raw = custom.sidebarSeparatorPresets;
+            else if (Array.isArray(custom.sidebarSeperatorPresets)) raw = custom.sidebarSeperatorPresets;
+          }
         } catch {
         }
       }
@@ -3874,7 +3912,7 @@ var plugins = (() => {
       if (!this._panelEl) return;
       this._panelEl.querySelectorAll("[data-plg-ss-live-line]").forEach((node) => {
         if (node instanceof HTMLElement) {
-          node.setAttribute("data-plg-sidebar-seperators-style", style.borderStyle);
+          node.setAttribute("data-plg-sidebar-separators-style", style.borderStyle);
           this._applyStyleVars(node, style);
         }
       });
@@ -3937,7 +3975,7 @@ var plugins = (() => {
 			}
 
 			${selector}:active,
-			${selector}.plg-sidebar-seperators-dragging {
+			${selector}.plg-sidebar-separators-dragging {
 				cursor: grabbing;
 			}
 
@@ -4029,7 +4067,7 @@ var plugins = (() => {
       if (!guid || !this._separators.has(guid)) return;
       this._dragRow = row;
       this._dragGuid = guid;
-      row.classList.add("plg-sidebar-seperators-dragging");
+      row.classList.add("plg-sidebar-separators-dragging");
       if (event.dataTransfer) {
         event.dataTransfer.effectAllowed = "move";
         try {
@@ -4057,7 +4095,7 @@ var plugins = (() => {
     async _finishDrag(remove) {
       const guid = this._dragGuid;
       const point = { ...this._lastDragPoint };
-      if (this._dragRow) this._dragRow.classList.remove("plg-sidebar-seperators-dragging");
+      if (this._dragRow) this._dragRow.classList.remove("plg-sidebar-separators-dragging");
       this._dragRow = null;
       this._dragGuid = null;
       this._cancelHold();
@@ -4079,7 +4117,7 @@ var plugins = (() => {
     }
     _beginHold() {
       if (this._removeTimer || !this._dragGuid) return;
-      document.body.classList.add("plg-sidebar-seperators-holding");
+      document.body.classList.add("plg-sidebar-separators-holding");
       this._showHoldIndicator();
       this._removeTimer = setTimeout(() => {
         this._removeTimer = null;
@@ -4091,13 +4129,13 @@ var plugins = (() => {
         clearTimeout(this._removeTimer);
         this._removeTimer = null;
       }
-      document.body.classList.remove("plg-sidebar-seperators-holding");
-      document.querySelectorAll(".plg-sidebar-seperators-hold").forEach((node) => node.remove());
+      document.body.classList.remove("plg-sidebar-separators-holding");
+      document.querySelectorAll(".plg-sidebar-separators-hold").forEach((node) => node.remove());
     }
     _showHoldIndicator() {
-      if (document.querySelector(".plg-sidebar-seperators-hold")) return;
+      if (document.querySelector(".plg-sidebar-separators-hold")) return;
       const indicator = document.createElement("div");
-      indicator.className = "plg-sidebar-seperators-hold";
+      indicator.className = "plg-sidebar-separators-hold";
       indicator.textContent = "Hold to remove";
       document.body.appendChild(indicator);
     }
@@ -4107,7 +4145,7 @@ var plugins = (() => {
      */
     _poof(x, y) {
       const root = document.createElement("div");
-      root.className = "plg-sidebar-seperators-poof";
+      root.className = "plg-sidebar-separators-poof";
       root.style.left = `${Math.max(12, x || 24)}px`;
       root.style.top = `${Math.max(12, y || 24)}px`;
       for (let i = 0; i < 12; i += 1) {
@@ -4229,13 +4267,14 @@ var plugins = (() => {
     _markSidebarRows() {
       const panelOpen = this._isPanelOpen();
       const activeGuids = new Set(this._separators.keys());
-      document.querySelectorAll(`[${MARK_ATTR}]`).forEach((node) => {
+      document.querySelectorAll(`[${MARK_ATTR}], [${LEGACY_MARK_ATTR}]`).forEach((node) => {
         if (!(node instanceof HTMLElement)) return;
         const guid = node.getAttribute("data-guid");
         if (guid && activeGuids.has(guid)) return;
         node.removeAttribute(MARK_ATTR);
-        node.removeAttribute("data-plg-sidebar-seperators-style");
-        node.removeAttribute("data-plg-sidebar-seperators-active");
+        node.removeAttribute(LEGACY_MARK_ATTR);
+        node.removeAttribute("data-plg-sidebar-separators-style");
+        node.removeAttribute("data-plg-sidebar-separators-active");
       });
       if (!panelOpen) {
         this._hideHoverActionOverlay();
@@ -4246,9 +4285,10 @@ var plugins = (() => {
         document.querySelectorAll(`${COLLECTION_ROW_SELECTOR}[data-guid="${safeGuid}"]`).forEach((node) => {
           if (node instanceof HTMLElement) {
             node.setAttribute(MARK_ATTR, "1");
-            node.setAttribute("data-plg-sidebar-seperators-style", (entry.style || this._defaultStyle).borderStyle);
-            if (panelOpen && this._activeOverrideGuid === guid) node.setAttribute("data-plg-sidebar-seperators-active", "1");
-            else node.removeAttribute("data-plg-sidebar-seperators-active");
+            node.setAttribute(LEGACY_MARK_ATTR, "1");
+            node.setAttribute("data-plg-sidebar-separators-style", (entry.style || this._defaultStyle).borderStyle);
+            if (panelOpen && this._activeOverrideGuid === guid) node.setAttribute("data-plg-sidebar-separators-active", "1");
+            else node.removeAttribute("data-plg-sidebar-separators-active");
             node.setAttribute("title", panelOpen ? "Edit or delete this separator" : "Sidebar separator");
             if (panelOpen) this._ensureSidebarActionButtons(node, guid);
           }
@@ -4265,8 +4305,8 @@ var plugins = (() => {
      * @param {string} guid
      */
     _ensureSidebarActionButtons(row, guid) {
-      if (row.dataset.plgSidebarSeperatorsActionsBound === "1") return;
-      row.dataset.plgSidebarSeperatorsActionsBound = "1";
+      if (row.dataset.plgSidebarSeparatorsActionsBound === "1") return;
+      row.dataset.plgSidebarSeparatorsActionsBound = "1";
       const show = /* @__PURE__ */ __name(() => this._showHoverActionOverlay(row, row.getAttribute("data-guid") || guid), "show");
       row.addEventListener("mouseenter", show);
       row.addEventListener("focusin", show);
@@ -4545,7 +4585,7 @@ var plugins = (() => {
 			}
 
 			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"]:active,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"].plg-sidebar-seperators-dragging {
+			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"].plg-sidebar-separators-dragging {
 				cursor: grabbing;
 			}
 
@@ -4597,7 +4637,7 @@ var plugins = (() => {
 				color: var(--tps-danger, #ef4444) !important;
 			}
 
-			@keyframes plgSidebarSeperatorsBreathe {
+			@keyframes plgSidebarSeparatorsBreathe {
 				0%, 100% { box-shadow: 0 0 0 0 var(--logo-color, currentColor)); }
 				50%      { box-shadow: 0 0 0 4px transparent; }
 			}
@@ -4605,7 +4645,7 @@ var plugins = (() => {
 			.${ACTION_OVERLAY_CLASS}.is-active-editing .${EDIT_BUTTON_CLASS} {
 				border-color: var(--logo-color, currentColor)) !important;
 				color: var(--logo-color, currentColor)) !important;
-				animation: plgSidebarSeperatorsBreathe 1.6s ease-in-out infinite;
+				animation: plgSidebarSeparatorsBreathe 1.6s ease-in-out infinite;
 			}
 
 			.${ACTION_OVERLAY_CLASS}.is-active-editing .${ACTION_BUTTON_CLASS}:hover {
@@ -4654,20 +4694,20 @@ var plugins = (() => {
 				border-color: color-mix(in srgb, var(--tps-accent, currentColor) 55%, transparent) !important;
 				background: color-mix(in srgb, var(--tps-accent, currentColor) 18%, var(--tps-panel-bg, ${THEME_SURFACE_CSS})) !important;
 				color: var(--tps-accent, var(--text-default, currentColor)) !important;
-				animation: plg-sidebar-seperators-edit-heartbeat 1600ms ease-in-out infinite;
+				animation: plg-sidebar-separators-edit-heartbeat 1600ms ease-in-out infinite;
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"].plg-sidebar-seperators-dragging {
+			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"].plg-sidebar-separators-dragging {
 				opacity: 0.58;
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-plg-sidebar-seperators-style="gradient"]::after {
+			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-plg-sidebar-separators-style="gradient"]::after {
 				border-top: 0;
 				height: max(var(--plg-ss-thickness, 1px), 1px);
 				background: var(--plg-ss-gradient);
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-plg-sidebar-seperators-style="double"]::after {
+			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-plg-sidebar-separators-style="double"]::after {
 				border-top: 0;
 				height: calc((var(--plg-ss-thickness, 1px) * 2) + var(--plg-ss-double-gap, 2px));
 				background:
@@ -5075,17 +5115,17 @@ var plugins = (() => {
 				border-top: var(--plg-ss-thickness, 1px) var(--plg-ss-style, solid) var(--plg-ss-color, currentColor);
 			}
 
-			.${PANEL_CLASS}__line[data-plg-sidebar-seperators-style="gradient"]::before {
+			.${PANEL_CLASS}__line[data-plg-sidebar-separators-style="gradient"]::before {
 				border-top: 0;
 				height: max(var(--plg-ss-thickness, 1px), 1px);
 				background: var(--plg-ss-gradient);
 			}
 
-			.${PANEL_CLASS}__line[data-plg-sidebar-seperators-style="double"] {
+			.${PANEL_CLASS}__line[data-plg-sidebar-separators-style="double"] {
 				height: calc((var(--plg-ss-thickness, 1px) * 2) + var(--plg-ss-double-gap, 2px));
 			}
 
-			.${PANEL_CLASS}__line[data-plg-sidebar-seperators-style="double"]::before {
+			.${PANEL_CLASS}__line[data-plg-sidebar-separators-style="double"]::before {
 				border-top: 0;
 				top: 0;
 				bottom: 0;
@@ -5797,7 +5837,7 @@ var plugins = (() => {
 				flex-wrap: wrap;
 			}
 
-			.plg-sidebar-seperators-hold {
+			.plg-sidebar-separators-hold {
 				position: fixed;
 				left: 50%;
 				bottom: 24px;
@@ -5814,10 +5854,10 @@ var plugins = (() => {
 				font-size: 12px;
 				line-height: 1;
 				pointer-events: none;
-				animation: plg-sidebar-seperators-hold-fill ${OUTSIDE_HOLD_MS}ms linear forwards;
+				animation: plg-sidebar-separators-hold-fill ${OUTSIDE_HOLD_MS}ms linear forwards;
 			}
 
-			.plg-sidebar-seperators-poof {
+			.plg-sidebar-separators-poof {
 				position: fixed;
 				z-index: 999999;
 				width: 2px;
@@ -5826,7 +5866,7 @@ var plugins = (() => {
 				transform: translate(-1px, -1px);
 			}
 
-			.plg-sidebar-seperators-poof span {
+			.plg-sidebar-separators-poof span {
 				position: absolute;
 				left: 0;
 				top: 0;
@@ -5836,14 +5876,14 @@ var plugins = (() => {
 				background: var(--tps-accent, var(--text-default, currentColor));
 				transform: rotate(var(--angle)) translateX(0) scale(0.7);
 				opacity: 0.9;
-				animation: plg-sidebar-seperators-poof 620ms cubic-bezier(0.15, 0.8, 0.2, 1) forwards;
+				animation: plg-sidebar-separators-poof 620ms cubic-bezier(0.15, 0.8, 0.2, 1) forwards;
 			}
 
-			@keyframes plg-sidebar-seperators-hold-fill {
+			@keyframes plg-sidebar-separators-hold-fill {
 				to { background-size: 100% 2px, auto; }
 			}
 
-			@keyframes plg-sidebar-seperators-poof {
+			@keyframes plg-sidebar-separators-poof {
 				65% {
 					opacity: 0.8;
 					transform: rotate(var(--angle)) translateX(var(--distance)) scale(1);
@@ -5854,7 +5894,7 @@ var plugins = (() => {
 				}
 			}
 
-			@keyframes plg-sidebar-seperators-edit-heartbeat {
+			@keyframes plg-sidebar-separators-edit-heartbeat {
 				0%, 100% {
 					background: color-mix(in srgb, var(--tps-accent, currentColor) 16%, var(--tps-panel-bg, ${THEME_SURFACE_CSS}));
 					box-shadow: 0 0 0 0 color-mix(in srgb, var(--tps-accent, currentColor) 0%, transparent);
@@ -5866,8 +5906,8 @@ var plugins = (() => {
 			}
 
 			@media (prefers-reduced-motion: reduce) {
-				.plg-sidebar-seperators-hold,
-				.plg-sidebar-seperators-poof span {
+				.plg-sidebar-separators-hold,
+				.plg-sidebar-separators-poof span {
 					animation-duration: 1ms;
 				}
 			}
