@@ -3269,7 +3269,7 @@ ${report}
   __name(pingActive, "pingActive");
 
   // plugin.js
-  var PLUGIN_VERSION = "2.1.3";
+  var PLUGIN_VERSION = "2.1.4";
   var PLUGIN_KEY = "sidebarSeparators";
   var MARK_ATTR = "data-plg-sidebar-separator";
   var SCHEMA_VERSION = 2;
@@ -3484,6 +3484,17 @@ ${report}
     _rowEls = /* @__PURE__ */ new Map();
     /** @type {Map<string, number>} id → last rendered gap index, used to re-home orphans */
     _lastGap = /* @__PURE__ */ new Map();
+    /**
+     * Workspace this instance belongs to, pinned once at load. The MutationObserver watches
+     * `document.body`, so on a workspace switch we can be handed a sidebar full of ANOTHER
+     * workspace's collections. Acting on that DOM (or writing storage from it) is never right.
+     * @type {string}
+     */
+    _wsGuid = "";
+    /** @type {string} storage key derived from `_wsGuid` ONCE — see `_storeKey()` */
+    _storeKeyCached = "";
+    /** @type {ReturnType<typeof setTimeout> | null} debounce for `_reconcileOrphans` */
+    _orphanTimer = null;
     /** @type {string[]} last known-good collection order (see `_collectionGuids`) */
     _collCache = [];
     /** @type {Map<string, string>} collection guid → display name */
@@ -3542,6 +3553,8 @@ ${report}
       this._activeOverrideId = null;
       this._editingPresetId = null;
       this._migrationRan = false;
+      this._wsGuid = this._readWorkspaceGuid();
+      this._storeKeyCached = `plg-sidebar-separators-v2:${this._wsGuid || "default"}`;
       this._customSwatches = this._loadCustomSwatches();
       this._presets = this._loadPresets();
       this._loadSeparators();
@@ -3627,6 +3640,10 @@ ${report}
       if (this._appearanceRaf) {
         cancelAnimationFrame(this._appearanceRaf);
         this._appearanceRaf = null;
+      }
+      if (this._orphanTimer) {
+        clearTimeout(this._orphanTimer);
+        this._orphanTimer = null;
       }
       if (this._configCommitTimer) {
         clearTimeout(this._configCommitTimer);
@@ -4398,22 +4415,45 @@ ${report}
      *     the reload it causes lands when nobody is looking (see `_onPanelChanged`)
      *   • on load we take whichever of {config, localStorage} has the higher `rev`
      */
-    _storeKey() {
-      let ws = "";
+    _readWorkspaceGuid() {
       try {
-        ws = this.getWorkspaceGuid ? this.getWorkspaceGuid() || "" : "";
+        return this.getWorkspaceGuid ? this.getWorkspaceGuid() || "" : "";
       } catch {
-        ws = "";
+        return "";
       }
-      return `plg-sidebar-separators-v2:${ws || "default"}`;
     }
-    /** @param {any} raw @returns {Separator | null} */
+    /**
+     * True while the live app is still showing the workspace this instance was loaded for.
+     *
+     * The MutationObserver is on `document.body`, so during a workspace switch we can be handed a
+     * sidebar full of ANOTHER workspace's collections while this instance is still alive. Every
+     * one of our anchors would look "missing" in that DOM. Reading it is useless; WRITING storage
+     * from it is destructive. Guard both.
+     */
+    _isOwnWorkspace() {
+      const now = this._readWorkspaceGuid();
+      if (!now || !this._wsGuid) return true;
+      return now === this._wsGuid;
+    }
+    /** Pinned at load — never recomputed, so a load and a save can't land in different buckets. */
+    _storeKey() {
+      if (this._storeKeyCached) return this._storeKeyCached;
+      this._storeKeyCached = `plg-sidebar-separators-v2:${this._readWorkspaceGuid() || "default"}`;
+      return this._storeKeyCached;
+    }
+    /**
+     * Placement (`anchorGuid` / `side` / `seq`) is user intent, so read it defensively: a value we
+     * fail to parse must not quietly become a *different valid* placement — from the outside that
+     * is indistinguishable from the user having moved the separator themselves.
+     * @param {any} raw @returns {Separator | null}
+     */
     _normalizeSeparator(raw) {
       if (!raw || typeof raw !== "object") return null;
       const id = typeof raw.id === "string" && raw.id ? raw.id : this._makeSeparatorId();
       const anchorGuid = typeof raw.anchorGuid === "string" && raw.anchorGuid ? raw.anchorGuid : null;
-      const side = raw.side === "before" ? "before" : "after";
-      const seq = Number.isFinite(raw.seq) ? Number(raw.seq) : 0;
+      const side = raw.side === "before" || raw.side === "after" ? raw.side : "after";
+      const rawSeq = typeof raw.seq === "string" ? Number(raw.seq) : raw.seq;
+      const seq = Number.isFinite(rawSeq) ? Number(rawSeq) : 0;
       const style = this._normalizeStyle(raw.style);
       return {
         id,
@@ -4473,6 +4513,7 @@ ${report}
     }
     /** Instant local write + a deferred config commit. Call after ANY separator mutation. */
     _saveSeparators() {
+      if (!this._isOwnWorkspace()) return;
       this._rev += 1;
       try {
         localStorage.setItem(this._storeKey(), JSON.stringify({ rev: this._rev, separators: this._serializeSeparators() }));
@@ -4538,6 +4579,7 @@ ${report}
       };
     }
     async _commitToConfig(extra = {}) {
+      if (!this._isOwnWorkspace()) return;
       const handle = this._selfPluginHandle();
       if (!handle) return;
       if (this._versionSynced) {
@@ -5235,7 +5277,7 @@ ${report}
         out.push(guid);
         this._collNames.set(guid, (node.textContent || "").trim() || "Collection");
       }
-      if (out.length) this._collCache = out;
+      if (out.length && out.length >= this._collCache.length) this._collCache = out;
       return out;
     }
     /**
@@ -5259,11 +5301,58 @@ ${report}
       }
       return this._collNames.get(guid) || "Collection";
     }
+    _scheduleOrphanReconcile() {
+      if (this._orphanTimer) return;
+      this._orphanTimer = setTimeout(() => {
+        this._orphanTimer = null;
+        void this._reconcileOrphans();
+      }, 1500);
+    }
+    /**
+     * The ONLY function allowed to persist a placement repair.
+     *
+     * A separator whose anchor is missing from the DOM is not necessarily orphaned — its
+     * collection may simply not have painted yet. So we ask the authoritative source
+     * (`data.getAllCollections()`) whether the collection still EXISTS. Only a collection that is
+     * genuinely gone justifies moving the user's separator.
+     */
+    async _reconcileOrphans() {
+      if (!this._isOwnWorkspace()) return;
+      if (!this._separators.size) return;
+      let live;
+      try {
+        const cols = await this.data.getAllCollections();
+        live = new Set((cols || []).map((c) => c && c.getGuid ? c.getGuid() : "").filter(Boolean));
+      } catch {
+        return;
+      }
+      if (!live.size) return;
+      if (!this._isOwnWorkspace()) return;
+      const guids = this._collectionGuids();
+      let repaired = false;
+      for (const sep of this._separators.values()) {
+        if (!sep.anchorGuid) continue;
+        if (live.has(sep.anchorGuid)) continue;
+        const fallback = this._lastGap.has(sep.id) ? (
+          /** @type {number} */
+          this._lastGap.get(sep.id)
+        ) : guids.length;
+        this._setGap(sep, fallback, guids);
+        repaired = true;
+      }
+      if (!repaired) return;
+      this._saveSeparators();
+      this._writeRuntimeStyle();
+      this._syncSeparatorRows();
+      if (this._isPanelOpen()) this._renderPanel();
+    }
     /**
      * Gap index of a separator: 0 = above the first collection, n = below the last.
+     * NOTE: -1 means "anchor not present in the DOM read you passed in" — that is NOT the same as
+     * "the collection was deleted". Only `_reconcileOrphans()` may conclude the latter.
      * @param {Separator} sep
      * @param {string[]} guids
-     * @returns {number} -1 when its anchor no longer exists
+     * @returns {number} -1 when its anchor is not in `guids`
      */
     _gapOf(sep, guids) {
       if (!sep.anchorGuid) return sep.side === "before" ? 0 : guids.length;
@@ -5313,6 +5402,7 @@ ${report}
      */
     _syncSeparatorRows() {
       if (this._disabled) return;
+      if (!this._isOwnWorkspace()) return;
       const list = this._sidebarList();
       if (!list) return;
       let collectionsChanged = false;
@@ -5339,17 +5429,9 @@ ${report}
           this._migrationRan = true;
           void this._migrateFromCollections();
         }
-        let repaired = false;
-        for (const sep of this._separators.values()) {
-          if (this._gapOf(sep, guids) !== -1) continue;
-          const fallback = this._lastGap.has(sep.id) ? (
-            /** @type {number} */
-            this._lastGap.get(sep.id)
-          ) : guids.length;
-          this._setGap(sep, fallback, guids);
-          repaired = true;
+        if (Array.from(this._separators.values()).some((sep) => this._gapOf(sep, guids) === -1)) {
+          this._scheduleOrphanReconcile();
         }
-        if (repaired) this._saveSeparators();
         const byGap = /* @__PURE__ */ new Map();
         for (const sep of this._separators.values()) {
           const g = this._gapOf(sep, guids);
