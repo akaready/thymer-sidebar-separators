@@ -2498,25 +2498,25 @@ var plugins = (() => {
   __name(pingActive, "pingActive");
 
   // plugin.js
-  var PLUGIN_VERSION = "1.1.1";
+  var PLUGIN_VERSION = "2.0.0";
   var PLUGIN_KEY = "sidebarSeparators";
   var MARK_ATTR = "data-plg-sidebar-separator";
+  var SCHEMA_VERSION = 2;
   var LEGACY_PLUGIN_KEY = "sidebarSeperators";
   var LEGACY_MARK_ATTR = "data-plg-sidebar-seperator";
   var PANEL_CLASS = "plg-sidebar-separators-panel";
   var COLLECTION_COLORS_CLASS = "plg-collection-colors";
   var PANEL_TYPE = "sidebar-separators-settings";
   var STYLE_ID2 = "plg-sidebar-separators-runtime-style";
-  var ACTION_BUTTON_CLASS = "plg-sidebar-separators-action-button";
-  var EDIT_BUTTON_CLASS = "plg-sidebar-separators-edit-button";
-  var DELETE_BUTTON_CLASS = "plg-sidebar-separators-delete-button";
-  var ACTION_OVERLAY_CLASS = "plg-sidebar-separators-action-overlay";
   var ROOT_SELECTOR = ".sidebar--icons, .sidebar";
   var COLLECTION_ROW_SELECTOR = ".sidebar-item-collection[data-guid]";
-  var OUTSIDE_HOLD_MS = 3e3;
+  var ROW_CLASS = "plg-ss-row";
+  var SEP_ID_ATTR = "data-plg-ss-id";
+  var DRAG_HIDE_CLASS = "plg-ss-native-drag";
+  var SIDEBAR_LIST_SELECTOR = ".sidebar--icons";
+  var BLOCK_STOP_SELECTOR = ".sidebar-item-collection, .sidebar-item-heading, .sidebar-item-divider, .sidebar-item-collsheading, .plg-st-sidebar-bottom, .sidebar-widget-container, .scal-root";
   var THEME_SURFACE_CSS = "var(--panel-bg-color, color-mix(in srgb, currentColor 10%, transparent))";
   var THEME_ACCENT_CSS = "var(--logo-color, currentColor)";
-  var SEPARATOR_COLLECTION_NAME = "\u200B";
   var SIDEBAR_DIVIDER_VAR_VALUE = "theme-var:--sidebar-divider-color";
   var SIDEBAR_DIVIDER_VAR_CSS = "var(--sidebar-divider-color, var(--divider-color, color-mix(in srgb, currentColor 14%, transparent)))";
   var BORDER_STYLES = (
@@ -2707,8 +2707,32 @@ var plugins = (() => {
     _observer = null;
     /** @type {string[]} */
     _handlerIds = [];
-    /** @type {Map<string, SeparatorEntry>} */
+    /** @type {Map<string, Separator>} keyed by separator id (NOT a collection guid) */
     _separators = /* @__PURE__ */ new Map();
+    /** @type {Map<string, HTMLElement>} id → our injected row element (reused across re-renders) */
+    _rowEls = /* @__PURE__ */ new Map();
+    /** @type {Map<string, number>} id → last rendered gap index, used to re-home orphans */
+    _lastGap = /* @__PURE__ */ new Map();
+    /** @type {string[]} last known-good collection order (see `_collectionGuids`) */
+    _collCache = [];
+    /** @type {Map<string, string>} collection guid → display name */
+    _collNames = /* @__PURE__ */ new Map();
+    /** @type {string} snapshot of the collection list; a change re-renders the panel */
+    _collSnapshot = "";
+    /** @type {number} monotonic revision; localStorage vs config reconciliation */
+    _rev = 0;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    _configCommitTimer = null;
+    /** @type {boolean} */
+    _migrationRan = false;
+    /** @type {Promise<void> | null} resolves once syncPluginVersionOnLoad has finished writing */
+    _versionSynced = null;
+    /** @type {boolean} re-entrancy guard for our own sidebar DOM writes */
+    _syncing = false;
+    /** @type {EventListener | null} */
+    _boundNativeDragStart = null;
+    /** @type {EventListener | null} */
+    _boundNativeDragEnd = null;
     /** @type {SeparatorPreset[]} global reusable looks, synced in plugin config */
     _presets = [];
     /** @type {string | null} guid of a preset currently open in the editor */
@@ -2721,44 +2745,10 @@ var plugins = (() => {
     _defaultStyle = { ...DEFAULT_STYLE };
     /** @type {HTMLElement | null} */
     _panelEl = null;
-    /** @type {string | null} */
-    _activeOverrideGuid = null;
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    _refreshTimer = null;
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    _removeTimer = null;
-    /** @type {HTMLElement | null} */
-    _dragRow = null;
-    /** @type {string | null} */
-    _dragGuid = null;
-    /** @type {{x: number, y: number}} */
-    _lastDragPoint = { x: 0, y: 0 };
-    /** @type {EventListener | null} */
-    _boundDragStart = null;
-    /** @type {EventListener | null} */
-    _boundDrag = null;
-    /** @type {EventListener | null} */
-    _boundDragEnd = null;
+    /** @type {string | null} id of the separator being edited */
+    _activeOverrideId = null;
     /** @type {EventListener | null} */
     _boundSeparatorActivate = null;
-    /** @type {Map<string, ReturnType<typeof setTimeout>>} */
-    _separatorSaveTimers = /* @__PURE__ */ new Map();
-    /** @type {Map<string, SeparatorStyle | null>} */
-    _pendingSeparatorStyles = /* @__PURE__ */ new Map();
-    /** @type {Map<string, SeparatorStyle | null>} */
-    _pendingCollapsedSeparatorStyles = /* @__PURE__ */ new Map();
-    /** @type {Set<string>} */
-    _nameFixGuids = /* @__PURE__ */ new Set();
-    /** @type {HTMLElement | null} */
-    _hoverActionOverlayEl = null;
-    /** @type {ReturnType<typeof setTimeout> | null} */
-    _hoverActionOverlayHideTimer = null;
-    /** @type {HTMLElement | null} */
-    _activeActionOverlayEl = null;
-    /** @type {ReturnType<typeof requestAnimationFrame> | null} */
-    _activeOverlayPositionRaf = null;
-    /** @type {(() => void) | null} */
-    _boundReposition = null;
     /** @type {{name: string, value: string, css: string, resolved: string, raw: string, source: string}[]} */
     _themeColors = [];
     /** @type {number} */
@@ -2777,12 +2767,15 @@ var plugins = (() => {
       pingInstall("sidebar-separators");
       pingActive("sidebar-separators");
       this._defaultStyle = this._normalizeStyle(DEFAULT_STYLE);
-      this._activeOverrideGuid = null;
+      this._activeOverrideId = null;
       this._editingPresetId = null;
+      this._migrationRan = false;
       this._customSwatches = this._loadCustomSwatches();
       this._presets = this._loadPresets();
+      this._loadSeparators();
       this._watchAppearance();
-      syncPluginVersionOnLoad(this, PLUGIN_VERSION);
+      this._versionSynced = Promise.resolve(syncPluginVersionOnLoad(this, PLUGIN_VERSION)).catch(() => {
+      });
       installInstantTooltip();
       this.ui.injectCSS(PANEL_CSS);
       this._injectCSS();
@@ -2803,30 +2796,35 @@ var plugins = (() => {
         if (!root) return;
         this._panelEl = root;
         this._renderPanel();
-        this._markSidebarRows();
+        this._syncSeparatorRows();
+        requestAnimationFrame(() => this._syncSeparatorRows());
       });
       this._handlerIds = [];
       try {
-        this._handlerIds.push(this.events.on("panel.closed", () => this._scheduleRefresh()));
-        this._handlerIds.push(this.events.on("panel.navigated", () => this._scheduleRefresh()));
+        this._handlerIds.push(this.events.on("panel.closed", () => this._onPanelChanged()));
+        this._handlerIds.push(this.events.on("panel.navigated", () => this._onPanelChanged()));
       } catch {
       }
-      this._boundDragStart = (event) => {
-        if (event instanceof DragEvent) this._onDragStart(event);
+      this._boundNativeDragStart = (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest(ROOT_SELECTOR)) {
+          document.body.classList.add(DRAG_HIDE_CLASS);
+        }
       };
-      this._boundDrag = (event) => {
-        if (event instanceof DragEvent) this._onDrag(event);
+      this._boundNativeDragEnd = () => {
+        if (!document.body.classList.contains(DRAG_HIDE_CLASS)) return;
+        document.body.classList.remove(DRAG_HIDE_CLASS);
+        this._syncSeparatorRows();
       };
-      this._boundDragEnd = () => this._finishDrag(false);
       this._boundSeparatorActivate = (event) => this._onSeparatorActivate(event);
-      document.addEventListener("dragstart", this._boundDragStart, true);
-      document.addEventListener("drag", this._boundDrag, true);
-      document.addEventListener("dragend", this._boundDragEnd, true);
+      document.addEventListener("dragstart", this._boundNativeDragStart, true);
+      document.addEventListener("dragend", this._boundNativeDragEnd, true);
+      document.addEventListener("drop", this._boundNativeDragEnd, true);
       document.addEventListener("click", this._boundSeparatorActivate, true);
       document.addEventListener("dblclick", this._boundSeparatorActivate, true);
       this._observer = new MutationObserver((mutations) => this._onMutations(mutations));
       if (document.body) this._observer.observe(document.body, { childList: true, subtree: true });
-      this._refreshSeparators();
+      this._syncSeparatorRows();
     }
     onUnload() {
       if (this._settingsCommand) {
@@ -2849,9 +2847,10 @@ var plugins = (() => {
         cancelAnimationFrame(this._appearanceRaf);
         this._appearanceRaf = null;
       }
-      if (this._refreshTimer) {
-        clearTimeout(this._refreshTimer);
-        this._refreshTimer = null;
+      if (this._configCommitTimer) {
+        clearTimeout(this._configCommitTimer);
+        this._configCommitTimer = null;
+        void this._commitToConfig();
       }
       for (const id of this._handlerIds) {
         try {
@@ -2860,95 +2859,64 @@ var plugins = (() => {
         }
       }
       this._handlerIds = [];
-      for (const timer of this._separatorSaveTimers.values()) clearTimeout(timer);
-      this._separatorSaveTimers.clear();
-      this._pendingSeparatorStyles.clear();
-      this._pendingCollapsedSeparatorStyles.clear();
-      if (this._boundDragStart) document.removeEventListener("dragstart", this._boundDragStart, true);
-      if (this._boundDrag) document.removeEventListener("drag", this._boundDrag, true);
-      if (this._boundDragEnd) document.removeEventListener("dragend", this._boundDragEnd, true);
+      if (this._boundNativeDragStart) document.removeEventListener("dragstart", this._boundNativeDragStart, true);
+      if (this._boundNativeDragEnd) {
+        document.removeEventListener("dragend", this._boundNativeDragEnd, true);
+        document.removeEventListener("drop", this._boundNativeDragEnd, true);
+      }
       if (this._boundSeparatorActivate) {
         document.removeEventListener("click", this._boundSeparatorActivate, true);
         document.removeEventListener("dblclick", this._boundSeparatorActivate, true);
       }
-      this._boundDragStart = null;
-      this._boundDrag = null;
-      this._boundDragEnd = null;
+      this._boundNativeDragStart = null;
+      this._boundNativeDragEnd = null;
       this._boundSeparatorActivate = null;
-      this._finishDrag(false);
-      if (this._boundReposition) {
-        window.removeEventListener("scroll", this._boundReposition, true);
-        window.removeEventListener("resize", this._boundReposition);
-        this._boundReposition = null;
-      }
-      if (this._activeOverlayPositionRaf) {
-        cancelAnimationFrame(this._activeOverlayPositionRaf);
-        this._activeOverlayPositionRaf = null;
-      }
-      this._hideHoverActionOverlay();
-      this._hideActiveActionOverlay();
-      document.querySelectorAll(`[${MARK_ATTR}]`).forEach((node) => node.removeAttribute(MARK_ATTR));
-      document.querySelectorAll(`.plg-sidebar-separators-poof, .plg-sidebar-separators-hold, .${ACTION_BUTTON_CLASS}, .${ACTION_OVERLAY_CLASS}`).forEach((node) => node.remove());
+      document.body.classList.remove(DRAG_HIDE_CLASS);
+      for (const row of this._rowEls.values()) row.remove();
+      this._rowEls.clear();
+      document.querySelectorAll(`.${ROW_CLASS}, .plg-sidebar-separators-poof`).forEach((node) => node.remove());
       const style = document.getElementById(STYLE_ID2);
       if (style) style.remove();
       this._panelEl = null;
     }
-    async _addSeparator() {
-      let collection = null;
-      try {
-        collection = await this.data.createCollection();
-      } catch {
-        collection = null;
-      }
-      if (!collection) {
-        this._toast("Separator was not created.");
-        return;
-      }
-      const conf = collection.getConfiguration ? collection.getConfiguration() : null;
-      if (!conf) {
-        this._toast("Separator was created, but could not be configured.");
-        return;
-      }
-      conf.name = SEPARATOR_COLLECTION_NAME;
-      conf.icon = "layout-list";
-      conf.description = "Sidebar separator created by Sidebar Separators.";
-      conf.show_cmdpal_items = false;
-      conf.show_sidebar_items = false;
-      conf.home = false;
-      const newMarker = {
-        isSeparator: true,
-        version: 1,
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        style: this._normalizeStyle(this._defaultStyle),
-        collapsedStyle: this._normalizeStyle(this._defaultStyle)
+    /**
+     * Panel closed/navigated. This is the safe window to flush pending separator state to
+     * plugin config: `this.saveConfiguration` reloads the plugin, and with the panel gone
+     * that reload is invisible.
+     */
+    _onPanelChanged() {
+      requestAnimationFrame(() => {
+        this._syncSeparatorRows();
+        if (!this._isPanelOpen() && this._configCommitTimer) {
+          clearTimeout(this._configCommitTimer);
+          this._configCommitTimer = null;
+          void this._commitToConfig();
+        }
+      });
+    }
+    /** Add a plugin-owned separator at the bottom of the collections list. */
+    _addSeparator() {
+      const guids = this._collectionGuids();
+      const style = this._normalizeStyle(this._defaultStyle);
+      const sep = {
+        id: this._makeSeparatorId(),
+        anchorGuid: guids.length ? guids[guids.length - 1] : null,
+        side: "after",
+        seq: this._nextSeqAtEnd(guids.length ? guids[guids.length - 1] : null, "after"),
+        presetId: null,
+        style,
+        collapsedStyle: this._normalizeStyle(style)
       };
-      conf.custom = {
-        ...conf.custom || {},
-        [PLUGIN_KEY]: newMarker,
-        // Mirror under the pre-rename key so an older Collection Colors build (which reads
-        // the marker to hide separators from its list) still recognises this collection.
-        [LEGACY_PLUGIN_KEY]: newMarker
-      };
-      try {
-        await collection.saveConfiguration(conf);
-        const guid = collection.getGuid();
-        this._separators.set(collection.getGuid(), {
-          collection,
-          guid,
-          name: conf.name,
-          presetId: null,
-          style: this._normalizeStyle(this._defaultStyle),
-          collapsedStyle: this._normalizeStyle(this._defaultStyle)
-        });
-        this._activeOverrideGuid = guid;
-        this._writeRuntimeStyle();
-        this._markSidebarRows();
-        this._scheduleRefresh();
-        this._renderPanel();
-        this._toast("Separator added.");
-      } catch {
-        this._toast("Separator was created, but settings were not saved.");
-      }
+      this._separators.set(sep.id, sep);
+      this._activeOverrideId = sep.id;
+      this._saveSeparators();
+      this._writeRuntimeStyle();
+      this._syncSeparatorRows();
+      this._renderPanel();
+      this._toast("Separator added.");
+    }
+    _makeSeparatorId() {
+      return `s${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
     }
     async _openPanel() {
       if (this._panelEl && document.contains(this._panelEl)) return;
@@ -2967,11 +2935,11 @@ var plugins = (() => {
       if (this._editingPresetId && !editingPreset) this._editingPresetId = null;
       if (editingPreset) {
         this._panelEl.replaceChildren(panel({ pluginClass: PANEL_CLASS }, this._presetEditorBody(editingPreset)));
-        this._markSidebarRows();
+        this._syncSeparatorRows();
         return;
       }
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      const activeStyle = selected && selected.style ? selected.style : this._defaultStyle;
+      const selected = this._activeSeparator();
+      const activeStyle = selected ? selected.style : this._defaultStyle;
       const body = [
         pluginHeaderFromConfig(this.getConfiguration(), { version: PLUGIN_VERSION }),
         h(
@@ -2982,18 +2950,173 @@ var plugins = (() => {
         ),
         this._sidebarPreview(activeStyle, selected)
       ];
+      const listSection = this._renderSeparatorList();
+      if (listSection) body.push(listSection);
       if (!selected) {
         body.push(h(
           "div",
           { class: `${PANEL_CLASS}__empty-state` },
-          h("p", { class: `${PANEL_CLASS}__helper` }, "Select an existing sidebar separator's pencil icon while this panel is open to edit it, or use Add New Separator above.")
+          h("p", { class: `${PANEL_CLASS}__helper` }, listSection ? "Select a separator above to edit it." : "No separators yet \u2014 use Add New Separator above.")
         ));
       } else {
+        body.push(this._renderAnchorSection(selected));
         body.push(this._renderDesignSection(selected));
         body.push(this._renderColorSection(activeStyle, selected));
       }
       this._panelEl.replaceChildren(panel({ pluginClass: PANEL_CLASS }, body));
-      this._markSidebarRows();
+      this._syncSeparatorRows();
+    }
+    /**
+     * "Moves with" — a separator sits in the gap between two collections, and is *attached* to
+     * one of them. Whichever it's attached to, it travels with when that collection is dragged.
+     * Flipping the side here does NOT move the separator; it only changes which neighbor owns it.
+     * @param {Separator} sep
+     */
+    /**
+     * The collection a separator is attached to, and which side of it the SEPARATOR sits on.
+     * The arrow describes the separator's position relative to that collection:
+     *   '↓' = the separator sits BELOW the collection (side 'after')
+     *   '↑' = the separator sits ABOVE the collection (side 'before')
+     * @param {Separator} sep
+     */
+    _anchorInfo(sep) {
+      const guids = this._collectionGuids();
+      const gap = this._gapOf(sep, guids);
+      const prevGuid = gap > 0 ? guids[gap - 1] : null;
+      const nextGuid = gap < guids.length ? guids[gap] : null;
+      const ownerGuid = sep.side === "after" ? prevGuid : nextGuid;
+      return {
+        guids,
+        gap,
+        prevGuid,
+        nextGuid,
+        ownerGuid,
+        ownerName: ownerGuid ? this._collectionName(ownerGuid) : null,
+        arrow: sep.side === "after" ? "\u2193" : "\u2191"
+      };
+    }
+    /** @param {Separator} sep */
+    _separatorTitle(sep) {
+      const { ownerName, arrow } = this._anchorInfo(sep);
+      return ownerName ? `Moves with ${ownerName} ${arrow}` : "Not attached to a collection";
+    }
+    /** Separators in sidebar order (top to bottom). @returns {Separator[]} */
+    _orderedSeparators() {
+      const guids = this._collectionGuids();
+      return Array.from(this._separators.values()).map((sep) => ({ sep, gap: this._gapOf(sep, guids) })).sort((a, b) => a.gap - b.gap || a.sep.seq - b.sep.seq).map((x) => x.sep);
+    }
+    /**
+     * Select a separator for editing — or, if it's already selected, deselect it. Toggling off
+     * collapses its settings back to the empty state and drops the ring in the sidebar, so there
+     * is always a way to "back out" of editing without picking a different separator.
+     * @param {string} id
+     */
+    _selectSeparator(id) {
+      if (!this._separators.has(id)) return;
+      this._activeOverrideId = this._activeOverrideId === id ? null : id;
+      this._renderPanel();
+      this._syncSeparatorRows();
+    }
+    /**
+     * @param {string} icon @param {string} title @param {boolean} disabled
+     * @param {() => void} onClick @param {boolean=} danger
+     */
+    _panelIconButton(icon, title, disabled, onClick, danger = false) {
+      return h("button", {
+        type: "button",
+        class: `${PANEL_CLASS}__sepbtn ${danger ? "is-danger" : ""}`,
+        title,
+        "aria-label": title,
+        disabled,
+        onClick: /* @__PURE__ */ __name((e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onClick();
+        }, "onClick")
+      }, h("i", { class: `ti ${icon}`, "aria-hidden": "true" }));
+    }
+    /**
+     * The separator list — this is the panel's spine. Each row is titled by the collection it
+     * moves with, carries its own ↑/↓/delete, and selecting one rings it to show that everything
+     * below edits THAT separator. Replaces the old hover-overlay-on-the-sidebar-row entirely.
+     */
+    _renderSeparatorList() {
+      const ordered = this._orderedSeparators();
+      if (!ordered.length) return null;
+      const guids = this._collectionGuids();
+      const rows = ordered.map((sep) => {
+        const isSel = this._activeOverrideId === sep.id;
+        const gap = this._gapOf(sep, guids);
+        const sameGap = ordered.filter((s) => this._gapOf(s, guids) === gap);
+        const idx = sameGap.findIndex((s) => s.id === sep.id);
+        const canUp = idx > 0 || gap > 0;
+        const canDown = idx < sameGap.length - 1 || gap < guids.length;
+        return h(
+          "div",
+          { class: `${PANEL_CLASS}__seprow ${isSel ? "is-active" : ""}` },
+          h(
+            "button",
+            {
+              type: "button",
+              class: `${PANEL_CLASS}__seprow-main`,
+              "aria-pressed": String(isSel),
+              onClick: /* @__PURE__ */ __name(() => this._selectSeparator(sep.id), "onClick")
+            },
+            h("span", { class: `${PANEL_CLASS}__seprow-rail` }, this._lineElement(`${PANEL_CLASS}__line`, sep.style)),
+            h("span", { class: `${PANEL_CLASS}__seprow-title` }, this._separatorTitle(sep))
+          ),
+          h(
+            "div",
+            { class: `${PANEL_CLASS}__seprow-actions` },
+            this._panelIconButton("ti-chevron-up", "Move up", !canUp, () => this._moveSeparator(sep.id, -1)),
+            this._panelIconButton("ti-chevron-down", "Move down", !canDown, () => this._moveSeparator(sep.id, 1)),
+            this._panelIconButton("ti-trash", "Delete separator", false, () => this._deleteSeparator(sep.id), true)
+          )
+        );
+      });
+      return h(
+        "section",
+        { class: "tps-section" },
+        h("div", { class: `${PANEL_CLASS}__state-title` }, "Separators"),
+        h("div", { class: `${PANEL_CLASS}__seplist` }, ...rows)
+      );
+    }
+    /**
+     * "Moves with" — which of the two neighbouring collections owns the selected separator.
+     * @param {Separator} sep
+     */
+    _renderAnchorSection(sep) {
+      const { prevGuid, nextGuid, ownerName, arrow } = this._anchorInfo(sep);
+      const choices = [];
+      if (prevGuid) choices.push({ side: "after", guid: prevGuid, label: `Stick below ${this._collectionName(prevGuid)} collection \u2193` });
+      if (nextGuid) choices.push({ side: "before", guid: nextGuid, label: `Stick above ${this._collectionName(nextGuid)} collection \u2191` });
+      const kids = [h("div", { class: `${PANEL_CLASS}__state-title` }, "Moves with")];
+      if (choices.length > 1) {
+        kids.push(h(
+          "div",
+          { class: `${PANEL_CLASS}__anchor-row` },
+          ...choices.map((c) => h("button", {
+            type: "button",
+            class: `${PANEL_CLASS}__anchor-btn ${sep.side === c.side ? "is-active" : ""}`,
+            "aria-pressed": String(sep.side === c.side),
+            onClick: /* @__PURE__ */ __name(() => {
+              if (sep.side === c.side) return;
+              sep.side = c.side;
+              sep.anchorGuid = c.guid;
+              this._saveSeparators();
+              this._syncSeparatorRows();
+              this._renderPanel();
+            }, "onClick")
+          }, c.label))
+        ));
+      } else {
+        kids.push(h(
+          "p",
+          { class: `${PANEL_CLASS}__helper` },
+          ownerName ? `Stuck ${sep.side === "after" ? "below" : "above"} ${ownerName} collection ${arrow}` : "Add a collection to attach this separator to one."
+        ));
+      }
+      return h("section", { class: "tps-section" }, ...kids);
     }
     /** @param {boolean=} force */
     _refreshThemeColors(force = false) {
@@ -3014,11 +3137,11 @@ var plugins = (() => {
       }));
     }
     /**
-     * @param {SeparatorEntry} selected
+     * @param {Separator} selected
      */
     _renderDesignSection(selected) {
-      const expandedStyle = selected.style ? selected.style : this._defaultStyle;
-      const collapsedStyle = selected.collapsedStyle ? selected.collapsedStyle : expandedStyle;
+      const expandedStyle = selected.style;
+      const collapsedStyle = selected.collapsedStyle || expandedStyle;
       return h(
         "section",
         { class: "tps-section" },
@@ -3029,31 +3152,31 @@ var plugins = (() => {
             "div",
             { class: `${PANEL_CLASS}__design-column` },
             h("div", { class: `${PANEL_CLASS}__state-title` }, "Expanded"),
-            this._styleEditor(expandedStyle, (next, render) => this._setActiveStyle(next, render), `sep-expanded-${selected.guid}`, () => this._activeStyleForEdit(expandedStyle))
+            this._styleEditor(expandedStyle, (next, render) => this._setActiveStyle(next, render), `sep-expanded-${selected.id}`, () => this._activeStyleForEdit(expandedStyle))
           ),
           h(
             "div",
             { class: `${PANEL_CLASS}__design-column` },
             h("div", { class: `${PANEL_CLASS}__state-title` }, "Collapsed"),
-            this._styleEditor(collapsedStyle, (next, render) => this._setActiveCollapsedStyle(next, render), `sep-collapsed-${selected.guid}`, () => this._activeCollapsedStyleForEdit(collapsedStyle))
+            this._styleEditor(collapsedStyle, (next, render) => this._setActiveCollapsedStyle(next, render), `sep-collapsed-${selected.id}`, () => this._activeCollapsedStyleForEdit(collapsedStyle))
           )
         )
       );
     }
     /**
      * @param {SeparatorStyle} style
-     * @param {SeparatorEntry} selected
+     * @param {Separator} selected
      */
     _renderColorSection(style, selected) {
       return h(
         "section",
         { class: "tps-section" },
-        this._colorPicker(style, (next, render) => this._setActiveColorStyle(next, render), `sep-color-${selected.guid}`)
+        this._colorPicker(style, (next, render) => this._setActiveColorStyle(next, render), `sep-color-${selected.id}`)
       );
     }
     /**
      * @param {SeparatorStyle} style
-     * @param {SeparatorEntry | null} selected
+     * @param {Separator | null} selected
      */
     _sidebarPreview(style, selected) {
       const line = this._lineElement(`${PANEL_CLASS}__line`, style);
@@ -3340,7 +3463,7 @@ var plugins = (() => {
         this._writeRuntimeStyle();
         const bg = this._sidebarBgColor();
         if (this._panelEl && bg) this._panelEl.querySelectorAll(`.${PANEL_CLASS}__preview`).forEach((n) => {
-          n.style.background = bg;
+          if (n instanceof HTMLElement) n.style.background = bg;
         });
       }, "check");
       try {
@@ -3378,7 +3501,7 @@ var plugins = (() => {
     /**
      * Map a stored separator color value onto a colorField value.
      * @param {SeparatorStyle} style
-     * @returns {{type:'theme',token:string} | {type:'hex',hex:string} | null}
+     * @returns {{type:'theme',token:string} | {type:'hex',hex:string} | {type:'tw',family:string,shadeIdx:number,invert:boolean} | null}
      */
     _colorFieldValueFor(style) {
       const c = style.color;
@@ -3391,25 +3514,25 @@ var plugins = (() => {
       const hex = this._resolveHexColor(style);
       return /^#[0-9a-f]{6}$/i.test(hex) ? { type: "hex", hex } : null;
     }
+    /** @returns {Separator | null} */
+    _activeSeparator() {
+      return this._activeOverrideId ? this._separators.get(this._activeOverrideId) || null : null;
+    }
     /**
      * @param {SeparatorStyle} next
      * @param {boolean=} render
      */
     _setActiveStyle(next, render = false) {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      if (selected) {
-        void this._setSeparatorStyle(selected.guid, next, render);
-      }
+      const sel = this._activeSeparator();
+      if (sel) this._setSeparatorStyle(sel.id, next, render);
     }
     /**
      * @param {SeparatorStyle} next
      * @param {boolean=} render
      */
     _setActiveCollapsedStyle(next, render = false) {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      if (selected) {
-        void this._setSeparatorCollapsedStyle(selected.guid, next, render);
-      }
+      const sel = this._activeSeparator();
+      if (sel) this._setSeparatorCollapsedStyle(sel.id, next, render);
     }
     /**
      * Shared color changes apply to both expanded and collapsed states.
@@ -3417,37 +3540,30 @@ var plugins = (() => {
      * @param {boolean=} render
      */
     _setActiveColorStyle(next, render = false) {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      if (!selected) return;
-      if (!this._applyingPreset) selected.presetId = null;
+      const sel = this._activeSeparator();
+      if (!sel) return;
+      if (!this._applyingPreset) sel.presetId = null;
       const colorPatch = { color: next.color, customColor: next.customColor };
-      const expanded = this._normalizeStyle({ ...selected.style || this._defaultStyle, ...colorPatch });
-      const collapsedBase = selected.collapsedStyle || selected.style || this._defaultStyle;
-      const collapsed = this._normalizeStyle({ ...collapsedBase, ...colorPatch });
-      selected.style = expanded;
-      selected.collapsedStyle = collapsed;
-      this._separators.set(selected.guid, selected);
-      this._pendingSeparatorStyles.set(selected.guid, expanded);
-      this._pendingCollapsedSeparatorStyles.set(selected.guid, collapsed);
+      sel.style = this._normalizeStyle({ ...sel.style, ...colorPatch });
+      sel.collapsedStyle = this._normalizeStyle({ ...sel.collapsedStyle, ...colorPatch });
+      this._saveSeparators();
       this._writeRuntimeStyle();
-      this._markSidebarRows();
-      this._updatePanelPreview(expanded);
+      this._updatePanelPreview(sel.style);
       if (render) this._renderPanel();
-      this._scheduleSeparatorSave(selected.guid);
     }
     /**
      * @param {SeparatorStyle} fallback
      */
     _activeStyleForEdit(fallback) {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      return selected && selected.style ? selected.style : fallback;
+      const sel = this._activeSeparator();
+      return sel ? sel.style : fallback;
     }
     /**
      * @param {SeparatorStyle} fallback
      */
     _activeCollapsedStyleForEdit(fallback) {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      return selected && selected.collapsedStyle ? selected.collapsedStyle : fallback;
+      const sel = this._activeSeparator();
+      return sel ? sel.collapsedStyle : fallback;
     }
     /**
      * @param {string} className
@@ -3463,102 +3579,203 @@ var plugins = (() => {
       return line;
     }
     /**
-     * @param {string} guid
-     * @param {Partial<SeparatorStyle> | null} style
+     * @param {string} id
+     * @param {Partial<SeparatorStyle>} style
      * @param {boolean=} render
      */
-    async _setSeparatorStyle(guid, style, render = false) {
-      const entry = this._separators.get(guid);
-      if (!entry) return;
-      if (!this._applyingPreset) entry.presetId = null;
-      const normalized = style ? this._normalizeStyle(style) : null;
-      entry.style = normalized;
-      this._separators.set(guid, entry);
-      this._pendingSeparatorStyles.set(guid, normalized);
+    _setSeparatorStyle(id, style, render = false) {
+      const sep = this._separators.get(id);
+      if (!sep) return;
+      if (!this._applyingPreset) sep.presetId = null;
+      sep.style = this._normalizeStyle(style);
+      this._saveSeparators();
       this._writeRuntimeStyle();
-      this._markSidebarRows();
-      if (normalized) this._updatePanelPreview(normalized);
+      this._updatePanelPreview(sep.style);
       if (render) this._renderPanel();
-      this._scheduleSeparatorSave(guid);
     }
     /**
-     * @param {string} guid
-     * @param {Partial<SeparatorStyle> | null} style
+     * @param {string} id
+     * @param {Partial<SeparatorStyle>} style
      * @param {boolean=} render
      */
-    async _setSeparatorCollapsedStyle(guid, style, render = false) {
-      const entry = this._separators.get(guid);
-      if (!entry) return;
-      if (!this._applyingPreset) entry.presetId = null;
-      const normalized = style ? this._normalizeStyle(style) : null;
-      entry.collapsedStyle = normalized;
-      this._separators.set(guid, entry);
-      this._pendingCollapsedSeparatorStyles.set(guid, normalized);
+    _setSeparatorCollapsedStyle(id, style, render = false) {
+      const sep = this._separators.get(id);
+      if (!sep) return;
+      if (!this._applyingPreset) sep.presetId = null;
+      sep.collapsedStyle = this._normalizeStyle(style);
+      this._saveSeparators();
       this._writeRuntimeStyle();
-      this._markSidebarRows();
-      if (normalized) this._updatePanelPreview(normalized);
+      this._updatePanelPreview(sep.collapsedStyle);
       if (render) this._renderPanel();
-      this._scheduleSeparatorSave(guid);
     }
-    /**
-     * @param {string} guid
+    /* ── Persistence ─────────────────────────────────────────────────────
+     *
+     * Plugin config is the SYNCED source of truth, but `this.saveConfiguration` reloads the
+     * whole plugin — which would orphan an open settings panel mid-edit. So:
+     *   • every change writes localStorage immediately (instant, no reload) and bumps `rev`
+     *   • a debounced commit pushes to plugin config, DEFERRED while the panel is open, so
+     *     the reload it causes lands when nobody is looking (see `_onPanelChanged`)
+     *   • on load we take whichever of {config, localStorage} has the higher `rev`
      */
-    _scheduleSeparatorSave(guid) {
-      const existing = this._separatorSaveTimers.get(guid);
-      if (existing) clearTimeout(existing);
-      const timer = setTimeout(() => {
-        this._separatorSaveTimers.delete(guid);
-        void this._saveSeparatorStyleNow(guid);
-      }, 800);
-      this._separatorSaveTimers.set(guid, timer);
-    }
-    /**
-     * @param {string} guid
-     */
-    async _saveSeparatorStyleNow(guid) {
-      const entry = this._separators.get(guid);
-      if (!entry) return;
-      const savedStyle = entry.style ? this._normalizeStyle(entry.style) : null;
-      const savedCollapsedStyle = entry.collapsedStyle ? this._normalizeStyle(entry.collapsedStyle) : null;
+    _storeKey() {
+      let ws = "";
       try {
-        const conf = entry.collection.getConfiguration();
-        const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
-        const marker = this._readMarker(conf) || { isSeparator: true, version: 1 };
-        const nextMarker = { ...marker };
-        if (savedStyle) nextMarker.style = savedStyle;
-        else delete nextMarker.style;
-        if (savedCollapsedStyle) nextMarker.collapsedStyle = savedCollapsedStyle;
-        else delete nextMarker.collapsedStyle;
-        if (entry.presetId) nextMarker.presetId = entry.presetId;
-        else delete nextMarker.presetId;
-        await entry.collection.saveConfiguration({
-          ...conf,
-          name: SEPARATOR_COLLECTION_NAME,
-          custom: {
-            ...custom,
-            [PLUGIN_KEY]: nextMarker,
-            [LEGACY_PLUGIN_KEY]: nextMarker
-            // keep the pre-rename key in step (see top of file)
-          }
-        });
-        if (JSON.stringify(this._pendingSeparatorStyles.get(guid) || null) === JSON.stringify(savedStyle)) {
-          this._pendingSeparatorStyles.delete(guid);
-        }
-        if (JSON.stringify(this._pendingCollapsedSeparatorStyles.get(guid) || null) === JSON.stringify(savedCollapsedStyle)) {
-          this._pendingCollapsedSeparatorStyles.delete(guid);
+        ws = this.getWorkspaceGuid ? this.getWorkspaceGuid() || "" : "";
+      } catch {
+        ws = "";
+      }
+      return `plg-sidebar-separators-v2:${ws || "default"}`;
+    }
+    /** @param {any} raw @returns {Separator | null} */
+    _normalizeSeparator(raw) {
+      if (!raw || typeof raw !== "object") return null;
+      const id = typeof raw.id === "string" && raw.id ? raw.id : this._makeSeparatorId();
+      const anchorGuid = typeof raw.anchorGuid === "string" && raw.anchorGuid ? raw.anchorGuid : null;
+      const side = raw.side === "before" ? "before" : "after";
+      const seq = Number.isFinite(raw.seq) ? Number(raw.seq) : 0;
+      const style = this._normalizeStyle(raw.style);
+      return {
+        id,
+        anchorGuid,
+        side,
+        seq,
+        presetId: typeof raw.presetId === "string" ? raw.presetId : null,
+        style,
+        collapsedStyle: this._normalizeStyle(raw.collapsedStyle || raw.style)
+      };
+    }
+    /** Read separators from the higher-`rev` of {plugin config, localStorage}. */
+    _loadSeparators() {
+      let confBlob = null;
+      try {
+        const conf = this.getConfiguration ? this.getConfiguration() : null;
+        const custom = conf && conf.custom && typeof conf.custom === "object" ? conf.custom : null;
+        if (custom && Array.isArray(custom.separators)) {
+          confBlob = { rev: Number(custom.rev) || 0, separators: custom.separators };
         }
       } catch {
-        this._toast("Could not save separator style.");
       }
+      let localBlob = null;
+      try {
+        const stored = localStorage.getItem(this._storeKey());
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed && Array.isArray(parsed.separators)) {
+            localBlob = { rev: Number(parsed.rev) || 0, separators: parsed.separators };
+          }
+        }
+      } catch {
+      }
+      const pick = !confBlob && !localBlob ? null : !confBlob ? localBlob : !localBlob ? confBlob : localBlob.rev > confBlob.rev ? localBlob : confBlob;
+      this._separators = /* @__PURE__ */ new Map();
+      this._rev = pick ? Number(pick.rev) || 0 : 0;
+      if (pick) {
+        for (const raw of pick.separators) {
+          const sep = this._normalizeSeparator(raw);
+          if (sep) this._separators.set(sep.id, sep);
+        }
+      }
+      const confRev = confBlob ? Number(confBlob.rev) || 0 : -1;
+      if (this._separators.size && confRev < this._rev) this._scheduleConfigCommit();
+    }
+    /** @returns {any[]} */
+    _serializeSeparators() {
+      return Array.from(this._separators.values()).map((s) => ({
+        id: s.id,
+        anchorGuid: s.anchorGuid,
+        side: s.side,
+        seq: s.seq,
+        presetId: s.presetId,
+        style: s.style,
+        collapsedStyle: s.collapsedStyle
+      }));
+    }
+    /** Instant local write + a deferred config commit. Call after ANY separator mutation. */
+    _saveSeparators() {
+      this._rev += 1;
+      try {
+        localStorage.setItem(this._storeKey(), JSON.stringify({ rev: this._rev, separators: this._serializeSeparators() }));
+      } catch {
+      }
+      this._scheduleConfigCommit();
+    }
+    _scheduleConfigCommit() {
+      if (this._configCommitTimer) clearTimeout(this._configCommitTimer);
+      this._configCommitTimer = setTimeout(() => {
+        this._configCommitTimer = null;
+        if (this._isPanelOpen()) {
+          this._scheduleConfigCommit();
+          return;
+        }
+        void this._commitToConfig();
+      }, 3e3);
     }
     /**
-     * @param {PluginConfiguration} conf
-     * @returns {SeparatorMarker | null}
+     * Write separators into plugin config (synced). NOTE: this reloads the plugin — only ever
+     * called with the settings panel closed.
+     * @param {Record<string, any>=} extra additional `custom` keys (migration uses this)
      */
-    _readMarker(conf) {
-      const custom = conf && conf.custom && typeof conf.custom === "object" ? conf.custom : {};
-      const marker = custom[PLUGIN_KEY] || custom[LEGACY_PLUGIN_KEY];
-      return marker && marker.isSeparator === true ? marker : null;
+    /**
+     * The handle through which an AppPlugin can write its OWN config.
+     *
+     * IMPORTANT: `this.saveConfiguration` does NOT exist on AppPlugin — calling it throws
+     * "saveConfiguration is not a function", silently swallowed by every try/catch. (That is
+     * why 1.x presets appeared to "only save on refresh": they never saved at all.) The plugin
+     * must fetch a handle to *itself* via `data.getPluginByGuid(getGuid())`, which does expose
+     * `saveConfiguration`. Confirmed against the live app 2026-07-12.
+     */
+    _selfPluginHandle() {
+      try {
+        const self = (
+          /** @type {any} */
+          this
+        );
+        const guid = self.getGuid ? self.getGuid() : null;
+        if (!guid) return null;
+        const handle = this.data.getPluginByGuid(guid);
+        return handle && typeof handle.saveConfiguration === "function" ? handle : null;
+      } catch {
+        return null;
+      }
+    }
+    async _commitToConfig(extra = {}) {
+      const handle = this._selfPluginHandle();
+      if (!handle) return;
+      if (this._versionSynced) {
+        try {
+          await this._versionSynced;
+        } catch {
+        }
+      }
+      let conf = {};
+      try {
+        conf = handle.getConfiguration ? handle.getConfiguration() : this.getConfiguration?.() || {};
+      } catch {
+        return;
+      }
+      if (typeof conf.name !== "string" || !conf.name.trim()) return;
+      const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
+      const nextRev = Math.max(this._rev, (Number(custom.rev) || 0) + 1);
+      this._rev = nextRev;
+      try {
+        await handle.saveConfiguration({
+          ...conf,
+          version: PLUGIN_VERSION,
+          custom: {
+            ...custom,
+            ...extra,
+            pluginVersion: PLUGIN_VERSION,
+            schemaVersion: SCHEMA_VERSION,
+            rev: nextRev,
+            separators: this._serializeSeparators()
+          }
+        });
+        try {
+          localStorage.setItem(this._storeKey(), JSON.stringify({ rev: nextRev, separators: this._serializeSeparators() }));
+        } catch {
+        }
+      } catch {
+      }
     }
     /* ── Presets ─────────────────────────────────────────────────────────── */
     _presetsKey() {
@@ -3641,13 +3858,13 @@ var plugins = (() => {
     }
     /** "Set preset" — snapshot the selected separator's current look (or defaults) as a new preset, then open it for editing. */
     _startNewPreset() {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
-      const style = this._normalizeStyle(selected && selected.style ? selected.style : this._defaultStyle);
-      const collapsedStyle = this._normalizeStyle(selected && selected.collapsedStyle ? selected.collapsedStyle : style);
+      const selected = this._activeSeparator();
+      const style = this._normalizeStyle(selected ? selected.style : this._defaultStyle);
+      const collapsedStyle = this._normalizeStyle(selected ? selected.collapsedStyle : style);
       const preset = { id: this._makePresetId(), name: `Preset ${this._presets.length + 1}`, style, collapsedStyle };
       this._presets.push(preset);
       this._savePresets();
-      if (selected) this._bindSeparatorToPreset(selected.guid, preset);
+      if (selected) this._bindSeparatorToPreset(selected.id, preset);
       this._editingPresetId = preset.id;
       this._renderPanel();
     }
@@ -3655,28 +3872,29 @@ var plugins = (() => {
     _applyPreset(presetId) {
       const preset = this._getPreset(presetId);
       if (!preset) return;
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
+      const selected = this._activeSeparator();
       if (!selected) {
         this._toast("Select a separator first, then apply a preset.");
         return;
       }
-      this._bindSeparatorToPreset(selected.guid, preset);
+      this._bindSeparatorToPreset(selected.id, preset);
       this._renderPanel();
     }
-    /** Copy a preset's look onto a separator and bind it (keeps the presetId link). @param {string} guid @param {SeparatorPreset} preset */
-    _bindSeparatorToPreset(guid, preset) {
-      const entry = this._separators.get(guid);
-      if (!entry) return;
+    /** Copy a preset's look onto a separator and bind it (keeps the presetId link). @param {string} id @param {SeparatorPreset} preset */
+    _bindSeparatorToPreset(id, preset) {
+      const sep = this._separators.get(id);
+      if (!sep) return;
       this._applyingPreset = true;
       try {
-        void this._setSeparatorStyle(guid, { ...preset.style }, false);
-        void this._setSeparatorCollapsedStyle(guid, { ...preset.collapsedStyle }, false);
+        sep.style = this._normalizeStyle({ ...preset.style });
+        sep.collapsedStyle = this._normalizeStyle({ ...preset.collapsedStyle });
       } finally {
         this._applyingPreset = false;
       }
-      entry.presetId = preset.id;
-      this._separators.set(guid, entry);
-      this._scheduleSeparatorSave(guid);
+      sep.presetId = preset.id;
+      this._saveSeparators();
+      this._writeRuntimeStyle();
+      this._updatePanelPreview(sep.style);
     }
     /** @param {string} presetId */
     _editPreset(presetId) {
@@ -3692,12 +3910,14 @@ var plugins = (() => {
     /** @param {string} presetId */
     _deletePreset(presetId) {
       this._presets = this._presets.filter((p) => p.id !== presetId);
-      for (const entry of this._separators.values()) {
-        if (entry.presetId === presetId) {
-          entry.presetId = null;
-          this._scheduleSeparatorSave(entry.guid);
+      let unbound = false;
+      for (const sep of this._separators.values()) {
+        if (sep.presetId === presetId) {
+          sep.presetId = null;
+          unbound = true;
         }
       }
+      if (unbound) this._saveSeparators();
       if (this._editingPresetId === presetId) this._editingPresetId = null;
       this._savePresets();
       this._renderPanel();
@@ -3742,25 +3962,24 @@ var plugins = (() => {
     }
     /** Push a preset's look onto every separator bound to it. @param {SeparatorPreset} preset */
     _propagatePreset(preset) {
+      let touched = false;
       this._applyingPreset = true;
       try {
-        for (const entry of this._separators.values()) {
-          if (entry.presetId !== preset.id) continue;
-          entry.style = this._normalizeStyle(preset.style);
-          entry.collapsedStyle = this._normalizeStyle(preset.collapsedStyle);
-          this._pendingSeparatorStyles.set(entry.guid, entry.style);
-          this._pendingCollapsedSeparatorStyles.set(entry.guid, entry.collapsedStyle);
-          this._scheduleSeparatorSave(entry.guid);
+        for (const sep of this._separators.values()) {
+          if (sep.presetId !== preset.id) continue;
+          sep.style = this._normalizeStyle(preset.style);
+          sep.collapsedStyle = this._normalizeStyle(preset.collapsedStyle);
+          touched = true;
         }
       } finally {
         this._applyingPreset = false;
       }
+      if (touched) this._saveSeparators();
       this._writeRuntimeStyle();
-      this._markSidebarRows();
     }
     /** Chips (name + edit + delete) plus the "Set preset" button, shown right of Add. */
     _renderPresetChips() {
-      const selected = this._activeOverrideGuid ? this._separators.get(this._activeOverrideGuid) || null : null;
+      const selected = this._activeSeparator();
       const wrap = h("div", { class: `${PANEL_CLASS}__presets` });
       for (const preset of this._presets) {
         const isSel = !!selected && selected.presetId === preset.id;
@@ -4070,89 +4289,35 @@ var plugins = (() => {
       style.id = STYLE_ID2;
       document.head.appendChild(style);
     }
+    /**
+     * One managed <style> holding the per-separator CSS vars, keyed on our own row id. This is
+     * the "persistent CSS" half of cookbook §16: a row re-injected after a Thymer re-render is
+     * already styled at first paint, before any JS runs.
+     */
     _writeRuntimeStyle() {
       this._ensureRuntimeStyle();
       const styleEl = document.getElementById(STYLE_ID2);
       if (!(styleEl instanceof HTMLStyleElement)) return;
-      const defaultVars = this._cssVarBlock(this._defaultStyle);
-      const collapsedDefaultVars = this._cssVarBlock(this._defaultStyle);
-      const perSeparator = Array.from(this._separators.values()).map((entry) => this._separatorRuntimeRules(entry.guid, entry.style || this._defaultStyle, entry.collapsedStyle || entry.style || this._defaultStyle)).join("\n");
+      const perSeparator = Array.from(this._separators.values()).map((sep) => this._separatorRuntimeRules(sep.id, sep.style, sep.collapsedStyle || sep.style)).join("\n");
       styleEl.textContent = `
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] { ${defaultVars} }
-			.sidebar.sidebar-collapsed .sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"],
-			.sidebar-collapsed .sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] { ${collapsedDefaultVars} }
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS} { ${this._cssVarBlock(this._defaultStyle)} }
 			${perSeparator}
 		`;
     }
     /**
-     * Cloak known separator rows by guid immediately, before mutation marking
-     * catches a freshly re-rendered sidebar row.
-     * @param {string} guid
+     * @param {string} id
      * @param {SeparatorStyle} expandedStyle
      * @param {SeparatorStyle} collapsedStyle
      */
-    _separatorRuntimeRules(guid, expandedStyle, collapsedStyle) {
-      const selector = `.sidebar--icons ${COLLECTION_ROW_SELECTOR}[data-guid="${this._cssEscape(guid)}"]`;
+    _separatorRuntimeRules(id, expandedStyle, collapsedStyle) {
+      const selector = `${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}[${SEP_ID_ATTR}="${this._cssEscape(id)}"]`;
       const collapsedSelector = `.sidebar.sidebar-collapsed ${selector}`;
       const collapsedAltSelector = `.sidebar-collapsed ${selector}`;
       return `
-			${selector} {
-				${this._cssVarBlock(expandedStyle)}
-				position: relative !important;
-				display: block !important;
-				min-height: var(--plg-ss-height, 20px) !important;
-				height: var(--plg-ss-height, 20px) !important;
-				padding-left: 0 !important;
-				padding-right: 0 !important;
-				padding-top: 0 !important;
-				padding-bottom: 0 !important;
-				overflow: hidden !important;
-				cursor: grab;
-				color: var(--text-default, currentColor) !important;
-				font-size: 0 !important;
-				line-height: 0 !important;
-			}
+			${selector} { ${this._cssVarBlock(expandedStyle)} }
 
 			${collapsedSelector},
-			${collapsedAltSelector} {
-				${this._cssVarBlock(collapsedStyle)}
-			}
-
-			${selector}:active,
-			${selector}.plg-sidebar-separators-dragging {
-				cursor: grabbing;
-			}
-
-			${selector} > *,
-			${selector} .sidebar-item-icon,
-			${selector} .sidebar-item-name,
-			${selector} .sidebar-item-title,
-			${selector} .sidebar-item-text,
-			${selector} .ti {
-				visibility: hidden !important;
-				opacity: 0 !important;
-				pointer-events: none !important;
-			}
-
-			${selector}::after {
-				content: "";
-				display: block;
-				position: absolute;
-				left: var(--plg-ss-left, 50%);
-				right: var(--plg-ss-right, auto);
-				top: 50%;
-				width: min(var(--plg-ss-width, 88%), calc(100% - (var(--plg-ss-inset, 10px) * 2)));
-				border-top: var(--plg-ss-thickness, 1px) var(--plg-ss-style, solid) var(--plg-ss-color, currentColor);
-				opacity: var(--plg-ss-opacity, 0.86);
-				transform-origin: center;
-				transform: var(--plg-ss-transform, translate(-50%, -50%));
-				transition: opacity 120ms ease-out, transform 120ms ease-out;
-			}
-
-			${selector}:hover::after {
-				opacity: var(--plg-ss-opacity, 1);
-				transform: var(--plg-ss-hover-transform, translate(-50%, -50%) scaleX(1.02));
-			}
+			${collapsedAltSelector} { ${this._cssVarBlock(collapsedStyle)} }
 
 			${this._separatorPseudoRules(selector, expandedStyle)}
 			${this._separatorPseudoRules(collapsedSelector, collapsedStyle)}
@@ -4201,89 +4366,6 @@ var plugins = (() => {
       return Object.entries(vars).map(([key, value]) => `${key}:${value};`).join("");
     }
     /**
-     * @param {DragEvent} event
-     */
-    _onDragStart(event) {
-      if (!(event.target instanceof Element)) return;
-      const row = event.target.closest(`${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"]`);
-      if (!(row instanceof HTMLElement)) return;
-      const guid = row.getAttribute("data-guid");
-      if (!guid || !this._separators.has(guid)) return;
-      this._dragRow = row;
-      this._dragGuid = guid;
-      row.classList.add("plg-sidebar-separators-dragging");
-      if (event.dataTransfer) {
-        event.dataTransfer.effectAllowed = "move";
-        try {
-          event.dataTransfer.setData("text/plain", guid);
-        } catch {
-        }
-      }
-      this._recordDragPoint(event);
-    }
-    /**
-     * @param {DragEvent} event
-     */
-    _onDrag(event) {
-      if (!this._dragGuid || !this._dragRow) return;
-      this._recordDragPoint(event);
-      if (this._isPointOutsideSidebar(this._lastDragPoint.x, this._lastDragPoint.y)) {
-        this._beginHold();
-      } else {
-        this._cancelHold();
-      }
-    }
-    /**
-     * @param {boolean} remove
-     */
-    async _finishDrag(remove) {
-      const guid = this._dragGuid;
-      const point = { ...this._lastDragPoint };
-      if (this._dragRow) this._dragRow.classList.remove("plg-sidebar-separators-dragging");
-      this._dragRow = null;
-      this._dragGuid = null;
-      this._cancelHold();
-      if (!remove || !guid) return;
-      this._poof(point.x, point.y);
-      try {
-        const plugin = this.data.getPluginByGuid(guid);
-        if (plugin && plugin.trashPlugin) plugin.trashPlugin();
-        this._separators.delete(guid);
-        if (this._activeOverrideGuid === guid) this._activeOverrideGuid = null;
-        this._hideHoverActionOverlay();
-        this._hideActiveActionOverlay();
-        this._writeRuntimeStyle();
-        this._scheduleRefresh();
-        this._renderPanel();
-      } catch {
-        this._toast("Could not remove separator.");
-      }
-    }
-    _beginHold() {
-      if (this._removeTimer || !this._dragGuid) return;
-      document.body.classList.add("plg-sidebar-separators-holding");
-      this._showHoldIndicator();
-      this._removeTimer = setTimeout(() => {
-        this._removeTimer = null;
-        this._finishDrag(true);
-      }, OUTSIDE_HOLD_MS);
-    }
-    _cancelHold() {
-      if (this._removeTimer) {
-        clearTimeout(this._removeTimer);
-        this._removeTimer = null;
-      }
-      document.body.classList.remove("plg-sidebar-separators-holding");
-      document.querySelectorAll(".plg-sidebar-separators-hold").forEach((node) => node.remove());
-    }
-    _showHoldIndicator() {
-      if (document.querySelector(".plg-sidebar-separators-hold")) return;
-      const indicator = document.createElement("div");
-      indicator.className = "plg-sidebar-separators-hold";
-      indicator.textContent = "Hold to remove";
-      document.body.appendChild(indicator);
-    }
-    /**
      * @param {number} x
      * @param {number} y
      */
@@ -4301,398 +4383,423 @@ var plugins = (() => {
       document.body.appendChild(root);
       setTimeout(() => root.remove(), 700);
     }
-    _scheduleRefresh() {
-      if (this._refreshTimer) return;
-      this._refreshTimer = setTimeout(() => {
-        this._refreshTimer = null;
-        this._refreshSeparators();
-      }, 80);
-    }
     /**
+     * Re-assert our rows SYNCHRONOUSLY inside the observer callback. MutationObserver callbacks
+     * are microtasks that drain before the next paint, so a row re-injected here lands in the
+     * same frame Thymer re-rendered the sidebar — no flash. (cookbook §16)
      * @param {MutationRecord[]} mutations
      */
     _onMutations(mutations) {
-      if (this._panelEl && document.contains(this._panelEl)) {
-        const panelEl = this._panelEl;
-        const touchesOutsidePanel = mutations.some((mutation) => {
-          const target = mutation.target;
-          if (target instanceof Node && panelEl.contains(target)) return false;
-          for (const node of mutation.addedNodes) {
-            if (panelEl.contains(node)) return false;
-            if (node instanceof Element && panelEl.contains(node)) return false;
-          }
-          for (const node of mutation.removedNodes) {
-            if (panelEl.contains(node)) return false;
-            if (node instanceof Element && panelEl.contains(node)) return false;
-          }
-          return true;
-        });
-        if (!touchesOutsidePanel) return;
-      }
-      if (this._separators.size && this._mutationsTouchSidebarRows(mutations)) {
-        this._markSidebarRows();
-      }
-      this._scheduleRefresh();
+      if (this._syncing) return;
+      if (!this._mutationsTouchSidebar(mutations)) return;
+      this._syncSeparatorRows();
     }
     /**
      * @param {MutationRecord[]} mutations
      */
-    _mutationsTouchSidebarRows(mutations) {
+    _mutationsTouchSidebar(mutations) {
       for (const mutation of mutations) {
         const target = mutation.target;
         if (target instanceof Element && target.closest(ROOT_SELECTOR)) return true;
-        for (const node of mutation.addedNodes) {
-          if (!(node instanceof Element)) continue;
-          if (node.matches(COLLECTION_ROW_SELECTOR) || node.querySelector(COLLECTION_ROW_SELECTOR) || node.closest(ROOT_SELECTOR)) return true;
-        }
-        for (const node of mutation.removedNodes) {
-          if (!(node instanceof Element)) continue;
-          if (node.matches(COLLECTION_ROW_SELECTOR) || node.querySelector(COLLECTION_ROW_SELECTOR) || node.closest(ROOT_SELECTOR)) return true;
+        for (const list of [mutation.addedNodes, mutation.removedNodes]) {
+          for (const node of list) {
+            if (!(node instanceof Element)) continue;
+            if (node.closest(ROOT_SELECTOR)) return true;
+            if (node.matches(ROOT_SELECTOR) || node.querySelector(COLLECTION_ROW_SELECTOR)) return true;
+          }
         }
       }
       return false;
     }
-    async _refreshSeparators() {
-      try {
-        const before = this._separatorSnapshot(this._separators);
-        const collections = await this.data.getAllCollections();
-        const next = /* @__PURE__ */ new Map();
-        for (const collection of collections || []) {
-          const conf = collection && collection.getConfiguration ? collection.getConfiguration() : null;
-          if (!conf) continue;
-          const marker = this._readMarker(conf);
-          if (!marker || !collection.getGuid) continue;
-          const guid = collection.getGuid();
-          if (conf.name !== SEPARATOR_COLLECTION_NAME && !this._nameFixGuids.has(guid)) {
-            this._nameFixGuids.add(guid);
-            void this._fixSeparatorCollectionName(collection, conf, guid);
-          }
-          const style = this._pendingSeparatorStyles.has(guid) ? this._pendingSeparatorStyles.get(guid) || null : marker.style ? this._normalizeStyle(marker.style) : null;
-          const collapsedStyle = this._pendingCollapsedSeparatorStyles.has(guid) ? this._pendingCollapsedSeparatorStyles.get(guid) || null : marker.collapsedStyle ? this._normalizeStyle(marker.collapsedStyle) : style;
-          next.set(guid, {
-            collection,
-            guid,
-            name: conf.name || collection.getName() || "Separator",
-            presetId: typeof marker.presetId === "string" ? marker.presetId : null,
-            style,
-            collapsedStyle
-          });
-        }
-        this._separators = next;
-        if (this._activeOverrideGuid && !this._separators.has(this._activeOverrideGuid)) this._activeOverrideGuid = null;
-        this._markSidebarRows();
-        this._writeRuntimeStyle();
-        if (before !== this._separatorSnapshot(next)) this._renderPanel();
-      } catch {
-        this._markSidebarRows();
-      }
+    /* ── Sidebar rows (the 2.0 core) ─────────────────────────────────────── */
+    /** The container holding collection rows as flat children. */
+    _sidebarList() {
+      const el = document.querySelector(SIDEBAR_LIST_SELECTOR);
+      return el instanceof HTMLElement ? el : null;
     }
     /**
-     * @param {Map<string, SeparatorEntry>} map
+     * STRICT live read of the collection rows, top to bottom — ignoring trashed ones and anything
+     * parked inside a foreign container (sidebar-tweaks' bottom stack, widgets). Row PLACEMENT
+     * must use this: it has to reflect the real DOM or we'd insert against stale anchors.
+     * @returns {string[]}
      */
-    _separatorSnapshot(map) {
-      return Array.from(map.values()).map((entry) => `${entry.guid}:${entry.name}:${JSON.stringify(entry.style || null)}:${JSON.stringify(entry.collapsedStyle || null)}`).sort().join("|");
-    }
-    /**
-     * @param {PluginCollectionAPI} collection
-     * @param {PluginConfiguration} conf
-     * @param {string} guid
-     */
-    async _fixSeparatorCollectionName(collection, conf, guid) {
-      try {
-        await collection.saveConfiguration({
-          ...conf,
-          name: SEPARATOR_COLLECTION_NAME
-        });
-      } catch {
-        this._nameFixGuids.delete(guid);
-      }
-    }
-    _markSidebarRows() {
-      const panelOpen = this._isPanelOpen();
-      const activeGuids = new Set(this._separators.keys());
-      document.querySelectorAll(`[${MARK_ATTR}], [${LEGACY_MARK_ATTR}]`).forEach((node) => {
-        if (!(node instanceof HTMLElement)) return;
+    _liveCollectionGuids() {
+      const list = this._sidebarList();
+      if (!list) return [];
+      const out = [];
+      for (const node of list.querySelectorAll(COLLECTION_ROW_SELECTOR)) {
+        if (!(node instanceof HTMLElement)) continue;
         const guid = node.getAttribute("data-guid");
-        if (guid && activeGuids.has(guid)) return;
-        node.removeAttribute(MARK_ATTR);
-        node.removeAttribute(LEGACY_MARK_ATTR);
-        node.removeAttribute("data-plg-sidebar-separators-style");
-        node.removeAttribute("data-plg-sidebar-separators-active");
-      });
-      if (!panelOpen) {
-        this._hideHoverActionOverlay();
-        this._hideActiveActionOverlay();
+        if (!guid || guid.startsWith("trashed-")) continue;
+        if (node.parentElement !== list) continue;
+        out.push(guid);
+        this._collNames.set(guid, (node.textContent || "").trim() || "Collection");
       }
-      for (const [guid, entry] of this._separators.entries()) {
-        const safeGuid = this._cssEscape(guid);
-        document.querySelectorAll(`${COLLECTION_ROW_SELECTOR}[data-guid="${safeGuid}"]`).forEach((node) => {
-          if (node instanceof HTMLElement) {
-            node.setAttribute(MARK_ATTR, "1");
-            node.setAttribute(LEGACY_MARK_ATTR, "1");
-            node.setAttribute("data-plg-sidebar-separators-style", (entry.style || this._defaultStyle).borderStyle);
-            if (panelOpen && this._activeOverrideGuid === guid) node.setAttribute("data-plg-sidebar-separators-active", "1");
-            else node.removeAttribute("data-plg-sidebar-separators-active");
-            node.setAttribute("title", panelOpen ? "Edit or delete this separator" : "Sidebar separator");
-            if (panelOpen) this._ensureSidebarActionButtons(node, guid);
+      if (out.length) this._collCache = out;
+      return out;
+    }
+    /**
+     * For RENDERING: the last known-good collection list. The panel can be built at a moment when
+     * the sidebar isn't readable (it re-renders as the panel opens); a strict read would come back
+     * empty and every separator would render as "Not attached to a collection" until something
+     * forced a re-render. Falling back to the cache keeps the titles honest.
+     * @returns {string[]}
+     */
+    _collectionGuids() {
+      const live = this._liveCollectionGuids();
+      return live.length ? live : this._collCache;
+    }
+    /** @param {string} guid */
+    _collectionName(guid) {
+      const row = document.querySelector(`${SIDEBAR_LIST_SELECTOR} ${COLLECTION_ROW_SELECTOR}[data-guid="${this._cssEscape(guid)}"]`);
+      const text = row ? (row.textContent || "").trim() : "";
+      if (text) {
+        this._collNames.set(guid, text);
+        return text;
+      }
+      return this._collNames.get(guid) || "Collection";
+    }
+    /**
+     * Gap index of a separator: 0 = above the first collection, n = below the last.
+     * @param {Separator} sep
+     * @param {string[]} guids
+     * @returns {number} -1 when its anchor no longer exists
+     */
+    _gapOf(sep, guids) {
+      if (!sep.anchorGuid) return sep.side === "before" ? 0 : guids.length;
+      const i = guids.indexOf(sep.anchorGuid);
+      if (i < 0) return -1;
+      return sep.side === "before" ? i : i + 1;
+    }
+    /**
+     * Re-anchor a separator to a gap, PRESERVING its side preference where the gap allows it
+     * (a gap can be expressed as {prev,'after'} or {next,'before'} — same place, different owner).
+     * @param {Separator} sep
+     * @param {number} gap
+     * @param {string[]} guids
+     */
+    _setGap(sep, gap, guids) {
+      const n = guids.length;
+      const g = Math.max(0, Math.min(n, gap));
+      if (!n) {
+        sep.anchorGuid = null;
+        sep.side = "before";
+        return;
+      }
+      if (sep.side === "before" && g < n) {
+        sep.anchorGuid = guids[g];
+        sep.side = "before";
+        return;
+      }
+      if (g > 0) {
+        sep.anchorGuid = guids[g - 1];
+        sep.side = "after";
+        return;
+      }
+      sep.anchorGuid = guids[0];
+      sep.side = "before";
+    }
+    /** @param {string | null} anchorGuid @param {'before'|'after'} side */
+    _nextSeqAtEnd(anchorGuid, side) {
+      let max = 0;
+      for (const s of this._separators.values()) {
+        if (s.anchorGuid === anchorGuid && s.side === side) max = Math.max(max, s.seq);
+      }
+      return max + 1;
+    }
+    /**
+     * Build/park our rows against their anchors. Idempotent: only touches the DOM when a row is
+     * missing or out of place, so it's safe to run on every sidebar mutation.
+     */
+    _syncSeparatorRows() {
+      const list = this._sidebarList();
+      if (!list) return;
+      let collectionsChanged = false;
+      this._syncing = true;
+      try {
+        for (const [id, row] of Array.from(this._rowEls.entries())) {
+          if (!this._separators.has(id)) {
+            row.remove();
+            this._rowEls.delete(id);
           }
-        });
+        }
+        for (const node of document.querySelectorAll(`.${ROW_CLASS}`)) {
+          const id = node.getAttribute(SEP_ID_ATTR) || "";
+          if (!this._separators.has(id) || this._rowEls.get(id) !== node) node.remove();
+        }
+        const guids = this._liveCollectionGuids();
+        if (!guids.length) return;
+        const snapshot = guids.map((g) => `${g}:${this._collNames.get(g) || ""}`).join("|");
+        if (snapshot !== this._collSnapshot) {
+          this._collSnapshot = snapshot;
+          collectionsChanged = true;
+        }
+        if (!this._migrationRan) {
+          this._migrationRan = true;
+          void this._migrateFromCollections();
+        }
+        let repaired = false;
+        for (const sep of this._separators.values()) {
+          if (this._gapOf(sep, guids) !== -1) continue;
+          const fallback = this._lastGap.has(sep.id) ? (
+            /** @type {number} */
+            this._lastGap.get(sep.id)
+          ) : guids.length;
+          this._setGap(sep, fallback, guids);
+          repaired = true;
+        }
+        if (repaired) this._saveSeparators();
+        const byGap = /* @__PURE__ */ new Map();
+        for (const sep of this._separators.values()) {
+          const g = this._gapOf(sep, guids);
+          if (g < 0) continue;
+          this._lastGap.set(sep.id, g);
+          if (!byGap.has(g)) byGap.set(g, []);
+          byGap.get(g).push(sep);
+        }
+        for (const [gap, seps] of byGap.entries()) {
+          seps.sort((a, b) => a.seq - b.seq);
+          const ref = this._gapRefNode(list, guids, gap);
+          for (let i = seps.length - 1; i >= 0; i -= 1) {
+            const sep = seps[i];
+            const row = this._ensureRowEl(sep);
+            const expectedNext = i < seps.length - 1 ? this._rowEls.get(seps[i + 1].id) || ref : ref;
+            if (row.parentElement !== list || row.nextElementSibling !== expectedNext) {
+              list.insertBefore(row, expectedNext);
+            }
+          }
+        }
+      } finally {
+        this._syncing = false;
       }
-      if (panelOpen) this._showActiveActionOverlay();
-      else this._hideActiveActionOverlay();
+      if (collectionsChanged && this._isPanelOpen()) this._renderPanel();
+    }
+    /**
+     * The node a gap's separators must be inserted BEFORE.
+     * Gap g < n → the collection row at index g (so we land after g-1's whole block, including
+     * its indented children). Gap n → the first thing after the last collection's block.
+     * @param {HTMLElement} list
+     * @param {string[]} guids
+     * @param {number} gap
+     * @returns {Element | null}
+     */
+    _gapRefNode(list, guids, gap) {
+      if (gap < guids.length) {
+        return list.querySelector(`:scope > ${COLLECTION_ROW_SELECTOR}[data-guid="${this._cssEscape(guids[gap])}"]`);
+      }
+      const last = list.querySelector(`:scope > ${COLLECTION_ROW_SELECTOR}[data-guid="${this._cssEscape(guids[guids.length - 1])}"]`);
+      if (!last) return null;
+      let cur = last.nextElementSibling;
+      while (cur) {
+        if (cur.classList.contains(ROW_CLASS)) {
+          cur = cur.nextElementSibling;
+          continue;
+        }
+        if (cur.matches(BLOCK_STOP_SELECTOR)) return cur;
+        cur = cur.nextElementSibling;
+      }
+      return null;
+    }
+    /** @param {Separator} sep */
+    _ensureRowEl(sep) {
+      let row = this._rowEls.get(sep.id);
+      if (!row) {
+        const el = document.createElement("div");
+        el.className = ROW_CLASS;
+        el.setAttribute(SEP_ID_ATTR, sep.id);
+        el.setAttribute(MARK_ATTR, "1");
+        el.setAttribute(LEGACY_MARK_ATTR, "1");
+        el.setAttribute("role", "button");
+        el.setAttribute("tabindex", "0");
+        el.setAttribute("aria-label", "Sidebar separator");
+        this._rowEls.set(sep.id, el);
+        row = el;
+      }
+      const panelOpen = this._isPanelOpen();
+      row.setAttribute("data-plg-sidebar-separators-style", sep.style.borderStyle);
+      if (panelOpen && this._activeOverrideId === sep.id) row.setAttribute("data-plg-sidebar-separators-active", "1");
+      else row.removeAttribute("data-plg-sidebar-separators-active");
+      if (panelOpen) row.setAttribute("data-plg-ss-selectable", "1");
+      else row.removeAttribute("data-plg-ss-selectable");
+      row.title = panelOpen ? "Click to edit this separator" : "Sidebar separator";
+      return row;
+    }
+    /**
+     * Move a separator one step up/down. Steps within its gap first (when separators are
+     * stacked), then across to the neighbouring gap.
+     * @param {string} id
+     * @param {-1 | 1} dir
+     */
+    _moveSeparator(id, dir) {
+      const sep = this._separators.get(id);
+      if (!sep) return;
+      const guids = this._collectionGuids();
+      if (!guids.length) return;
+      const gap = this._gapOf(sep, guids);
+      if (gap < 0) return;
+      const sameGap = Array.from(this._separators.values()).filter((s) => this._gapOf(s, guids) === gap).sort((a, b) => a.seq - b.seq);
+      const idx = sameGap.findIndex((s) => s.id === id);
+      const neighbour = sameGap[idx + dir];
+      if (neighbour) {
+        const tmp = sep.seq;
+        sep.seq = neighbour.seq;
+        neighbour.seq = tmp;
+      } else {
+        const target = gap + dir;
+        if (target < 0 || target > guids.length) return;
+        this._setGap(sep, target, guids);
+        const destSeqs = Array.from(this._separators.values()).filter((s) => s.id !== id && this._gapOf(s, guids) === target).map((s) => s.seq);
+        if (destSeqs.length) {
+          sep.seq = dir === 1 ? Math.min(...destSeqs) - 1 : Math.max(...destSeqs) + 1;
+        } else {
+          sep.seq = 1;
+        }
+      }
+      this._saveSeparators();
+      this._syncSeparatorRows();
+      this._renderPanel();
     }
     _isPanelOpen() {
       return !!(this._panelEl && document.contains(this._panelEl));
     }
     /**
-     * @param {HTMLElement} row
-     * @param {string} guid
-     */
-    _ensureSidebarActionButtons(row, guid) {
-      if (row.dataset.plgSidebarSeparatorsActionsBound === "1") return;
-      row.dataset.plgSidebarSeparatorsActionsBound = "1";
-      const show = /* @__PURE__ */ __name(() => this._showHoverActionOverlay(row, row.getAttribute("data-guid") || guid), "show");
-      row.addEventListener("mouseenter", show);
-      row.addEventListener("focusin", show);
-      row.addEventListener("mouseleave", () => this._scheduleHideHoverActionOverlay());
-    }
-    /**
-     * Build a fresh action-overlay element (edit + trash buttons). Two
-     * separate overlays use this: a transient `hover` overlay that follows
-     * the cursor, and a persistent `active` overlay that stays mounted on
-     * the currently-edited separator while the panel is open. Both behave
-     * identically functionally; `is-active-editing` adds the breathing ring.
-     * @param {string} guid
-     * @param {{ active: boolean }} opts
-     */
-    _buildActionOverlay(guid, { active }) {
-      const edit = this._sidebarActionButton("Edit separator", "ti-pencil", EDIT_BUTTON_CLASS);
-      const del = this._sidebarActionButton("Delete separator", "ti-trash", DELETE_BUTTON_CLASS);
-      const overlay = document.createElement("div");
-      overlay.className = ACTION_OVERLAY_CLASS + (active ? " is-active-editing" : "");
-      overlay.dataset.guid = guid;
-      overlay.append(edit, del);
-      edit.onclick = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        this._activeOverrideGuid = guid;
-        const entry = this._separators.get(guid);
-        if (entry && !entry.style) entry.style = this._normalizeStyle(this._defaultStyle);
-        if (entry && !entry.collapsedStyle) entry.collapsedStyle = entry.style ? this._normalizeStyle(entry.style) : this._normalizeStyle(this._defaultStyle);
-        this._renderPanel();
-        this._markSidebarRows();
-      };
-      del.onclick = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        void this._deleteSeparator(guid, del);
-      };
-      return overlay;
-    }
-    /**
-     * @param {HTMLElement} row
-     * @param {string} guid
-     */
-    _showHoverActionOverlay(row, guid) {
-      if (!this._isPanelOpen()) return;
-      if (this._activeOverrideGuid === guid) return;
-      if (this._hoverActionOverlayHideTimer) {
-        clearTimeout(this._hoverActionOverlayHideTimer);
-        this._hoverActionOverlayHideTimer = null;
-      }
-      let overlay = this._hoverActionOverlayEl;
-      if (!overlay || !document.contains(overlay) || overlay.dataset.guid !== guid) {
-        if (overlay) overlay.remove();
-        overlay = this._buildActionOverlay(guid, { active: false });
-        overlay.addEventListener("mouseenter", () => {
-          if (this._hoverActionOverlayHideTimer) {
-            clearTimeout(this._hoverActionOverlayHideTimer);
-            this._hoverActionOverlayHideTimer = null;
-          }
-        });
-        overlay.addEventListener("mouseleave", () => this._scheduleHideHoverActionOverlay());
-        document.body.appendChild(overlay);
-        this._hoverActionOverlayEl = overlay;
-      }
-      this._positionActionOverlay(overlay, row);
-    }
-    _scheduleHideHoverActionOverlay() {
-      if (this._hoverActionOverlayHideTimer) clearTimeout(this._hoverActionOverlayHideTimer);
-      this._hoverActionOverlayHideTimer = setTimeout(() => {
-        this._hoverActionOverlayHideTimer = null;
-        this._hideHoverActionOverlay();
-      }, 600);
-    }
-    _hideHoverActionOverlay() {
-      if (this._hoverActionOverlayHideTimer) {
-        clearTimeout(this._hoverActionOverlayHideTimer);
-        this._hoverActionOverlayHideTimer = null;
-      }
-      if (this._hoverActionOverlayEl) {
-        this._hoverActionOverlayEl.remove();
-        this._hoverActionOverlayEl = null;
-      }
-    }
-    /**
-     * Mount/refresh the persistent overlay on the actively-edited separator
-     * row. Stays put no matter where the pointer roams. Hidden when the
-     * panel closes or no separator is active.
-     */
-    _showActiveActionOverlay() {
-      if (!this._isPanelOpen() || !this._activeOverrideGuid) {
-        this._hideActiveActionOverlay();
-        return;
-      }
-      const safeGuid = this._cssEscape(this._activeOverrideGuid);
-      const row = document.querySelector(`${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-guid="${safeGuid}"]`);
-      if (!(row instanceof HTMLElement)) {
-        this._hideActiveActionOverlay();
-        return;
-      }
-      let overlay = this._activeActionOverlayEl;
-      if (!overlay || !document.contains(overlay) || overlay.dataset.guid !== this._activeOverrideGuid) {
-        if (overlay) overlay.remove();
-        overlay = this._buildActionOverlay(this._activeOverrideGuid, { active: true });
-        document.body.appendChild(overlay);
-        this._activeActionOverlayEl = overlay;
-      }
-      this._positionActionOverlay(overlay, row);
-      if (this._hoverActionOverlayEl && this._hoverActionOverlayEl.dataset.guid === this._activeOverrideGuid) {
-        this._hideHoverActionOverlay();
-      }
-      this._ensureRepositionListeners();
-    }
-    _hideActiveActionOverlay() {
-      if (this._activeActionOverlayEl) {
-        this._activeActionOverlayEl.remove();
-        this._activeActionOverlayEl = null;
-      }
-    }
-    /**
-     * @param {HTMLElement} overlay
-     * @param {HTMLElement} row
-     */
-    _positionActionOverlay(overlay, row) {
-      const rect = row.getBoundingClientRect();
-      overlay.style.left = `${Math.round(rect.right + 6)}px`;
-      overlay.style.top = `${Math.round(rect.top + rect.height / 2)}px`;
-    }
-    /**
-     * Keep both overlays positioned correctly when the sidebar scrolls or
-     * the window resizes. Bound once, removed on unload.
-     */
-    _ensureRepositionListeners() {
-      if (this._boundReposition) return;
-      const reposition = /* @__PURE__ */ __name(() => {
-        if (this._activeOverlayPositionRaf) return;
-        this._activeOverlayPositionRaf = requestAnimationFrame(() => {
-          this._activeOverlayPositionRaf = null;
-          if (this._activeActionOverlayEl && this._activeActionOverlayEl.dataset.guid) {
-            const safeGuid = this._cssEscape(this._activeActionOverlayEl.dataset.guid);
-            const row = document.querySelector(`${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-guid="${safeGuid}"]`);
-            if (row instanceof HTMLElement) this._positionActionOverlay(this._activeActionOverlayEl, row);
-          }
-          if (this._hoverActionOverlayEl && this._hoverActionOverlayEl.dataset.guid) {
-            const safeGuid = this._cssEscape(this._hoverActionOverlayEl.dataset.guid);
-            const row = document.querySelector(`${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-guid="${safeGuid}"]`);
-            if (row instanceof HTMLElement) this._positionActionOverlay(this._hoverActionOverlayEl, row);
-          }
-        });
-      }, "reposition");
-      this._boundReposition = reposition;
-      window.addEventListener("scroll", reposition, true);
-      window.addEventListener("resize", reposition);
-    }
-    /**
-     * @param {string} title
-     * @param {string} iconClass
-     * @param {string} extraClass
-     */
-    _sidebarActionButton(title, iconClass, extraClass) {
-      const buttonEl = document.createElement("button");
-      buttonEl.type = "button";
-      buttonEl.className = `${ACTION_BUTTON_CLASS} ${extraClass}`;
-      buttonEl.title = title;
-      buttonEl.setAttribute("aria-label", title);
-      const icon = document.createElement("i");
-      icon.className = `ti ${iconClass}`;
-      icon.setAttribute("aria-hidden", "true");
-      buttonEl.appendChild(icon);
-      return buttonEl;
-    }
-    /**
+     * A click on a separator must never reach Thymer (it would navigate) or Sidebar Tweaks (it
+     * would collapse the sidebar). While the settings panel is open, it selects the separator
+     * for editing — the row is `role="button"` precisely because it is one.
      * @param {Event} event
      */
     _onSeparatorActivate(event) {
       if (!(event.target instanceof Element)) return;
-      const row = event.target.closest(`${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"]`);
+      const row = event.target.closest(`.${ROW_CLASS}`);
       if (!(row instanceof HTMLElement)) return;
-      if (event.target.closest(`.${ACTION_BUTTON_CLASS}`)) return;
       event.preventDefault();
       event.stopPropagation();
+      if (event.type !== "click" || !this._isPanelOpen()) return;
+      const id = row.getAttribute(SEP_ID_ATTR);
+      if (!id || !this._separators.has(id)) return;
+      this._selectSeparator(id);
     }
     /**
-     * @param {string} guid
+     * @param {string} id
      * @param {HTMLElement | null} source
      */
-    async _deleteSeparator(guid, source = null) {
-      const entry = this._separators.get(guid);
-      if (!entry) return;
+    _deleteSeparator(id, source = null) {
+      if (!this._separators.has(id)) return;
       if (source) {
         const rect = source.getBoundingClientRect();
         this._poof(rect.left + rect.width / 2, rect.top + rect.height / 2);
       }
-      try {
-        const plugin = this.data.getPluginByGuid(guid);
-        if (plugin && plugin.trashPlugin) plugin.trashPlugin();
-        this._separators.delete(guid);
-        if (this._activeOverrideGuid === guid) this._activeOverrideGuid = null;
-        this._hideHoverActionOverlay();
-        this._hideActiveActionOverlay();
-        this._writeRuntimeStyle();
-        this._markSidebarRows();
-        this._renderPanel();
-        this._scheduleRefresh();
-      } catch {
-        this._toast("Could not delete separator.");
-      }
+      this._separators.delete(id);
+      this._lastGap.delete(id);
+      const row = this._rowEls.get(id);
+      if (row) row.remove();
+      this._rowEls.delete(id);
+      if (this._activeOverrideId === id) this._activeOverrideId = null;
+      this._saveSeparators();
+      this._writeRuntimeStyle();
+      this._syncSeparatorRows();
+      this._renderPanel();
     }
-    /**
-     * @returns {Promise<number>}
+    /* ── 1.x → 2.0 migration ─────────────────────────────────────────────
+     *
+     * 1.x separators were real collections. Convert each into a plugin-owned separator anchored
+     * to the collection above it (read from the live sidebar DOM — that's the only place the
+     * order lives), then TRASH the collection so it stops polluting @-refs and search.
+     *
+     * Ordering is defensive: persist first, trash second. A guid that is persisted but not yet
+     * trashed is parked in `custom.pendingTrash` and retried on the next load, so a half-run can
+     * never leave a blank collection behind — and never double-migrates (a migrated guid is
+     * skipped even if its trash failed).
      */
-    async _nextSeparatorIndex() {
+    async _migrateFromCollections() {
+      let conf = {};
+      try {
+        conf = this.getConfiguration?.() || {};
+      } catch {
+        return;
+      }
+      const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
+      const pendingTrash = Array.isArray(custom.pendingTrash) ? custom.pendingTrash.slice() : [];
+      const legacy = [];
       try {
         const collections = await this.data.getAllCollections();
-        let count = 0;
         for (const collection of collections || []) {
-          const conf = collection && collection.getConfiguration ? collection.getConfiguration() : null;
-          if (conf && this._readMarker(conf)) count += 1;
+          if (!collection || !collection.getGuid || !collection.getConfiguration) continue;
+          const cconf = collection.getConfiguration();
+          const marker = cconf && cconf.custom && typeof cconf.custom === "object" ? cconf.custom[PLUGIN_KEY] || cconf.custom[LEGACY_PLUGIN_KEY] : null;
+          if (!marker || marker.isSeparator !== true) continue;
+          const guid = collection.getGuid();
+          if (pendingTrash.includes(guid)) continue;
+          legacy.push({ guid, marker });
         }
-        return count + 1;
       } catch {
-        return this._separators.size + 1;
+        return;
       }
-    }
-    /**
-     * @param {DragEvent} event
-     */
-    _recordDragPoint(event) {
-      if (event.clientX || event.clientY) {
-        this._lastDragPoint = { x: event.clientX, y: event.clientY };
+      if (legacy.length) {
+        const list = this._sidebarList();
+        const rows = list ? Array.from(list.querySelectorAll(COLLECTION_ROW_SELECTOR)) : [];
+        const legacyGuids = new Set(legacy.map((l) => l.guid));
+        let seq = 1;
+        for (const { guid, marker } of legacy) {
+          const idx = rows.findIndex((r) => r.getAttribute("data-guid") === guid);
+          let anchorGuid = null;
+          if (idx > 0) {
+            for (let i = idx - 1; i >= 0; i -= 1) {
+              const g = rows[i].getAttribute("data-guid");
+              if (g && !legacyGuids.has(g) && !g.startsWith("trashed-")) {
+                anchorGuid = g;
+                break;
+              }
+            }
+          }
+          const style = this._normalizeStyle(marker.style);
+          const sep = {
+            id: this._makeSeparatorId(),
+            anchorGuid,
+            side: anchorGuid ? "after" : "before",
+            seq: seq++,
+            presetId: typeof marker.presetId === "string" ? marker.presetId : null,
+            style,
+            collapsedStyle: this._normalizeStyle(marker.collapsedStyle || marker.style)
+          };
+          this._separators.set(sep.id, sep);
+          pendingTrash.push(guid);
+        }
+        this._rev += 1;
+        try {
+          localStorage.setItem(this._storeKey(), JSON.stringify({ rev: this._rev, separators: this._serializeSeparators() }));
+        } catch {
+        }
+        this._writeRuntimeStyle();
+        this._syncSeparatorRows();
+        try {
+          await this._commitToConfig({
+            pendingTrash,
+            migrationBackup: legacy.reduce((acc, l) => {
+              acc[l.guid] = l.marker;
+              return acc;
+            }, {})
+          });
+        } catch {
+          this._toast("Sidebar Separators: could not save the 2.0 migration; your old separators were left alone.");
+          return;
+        }
       }
-    }
-    /**
-     * @param {number} x
-     * @param {number} y
-     */
-    _isPointOutsideSidebar(x, y) {
-      if (!x && !y) return false;
-      const sidebars = Array.from(document.querySelectorAll(ROOT_SELECTOR)).filter((node) => node instanceof HTMLElement);
-      if (!sidebars.length) return false;
-      return !sidebars.some((sidebar) => {
-        const rect = sidebar.getBoundingClientRect();
-        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-      });
+      if (!pendingTrash.length) return;
+      const stillPending = [];
+      for (const guid of pendingTrash) {
+        try {
+          const plugin = this.data.getPluginByGuid(guid);
+          if (plugin && plugin.trashPlugin) plugin.trashPlugin();
+          else stillPending.push(guid);
+        } catch {
+          stillPending.push(guid);
+        }
+      }
+      if (stillPending.length !== pendingTrash.length) {
+        await this._commitToConfig({ pendingTrash: stillPending });
+      }
+      if (legacy.length) this._toast(`Sidebar Separators 2.0: converted ${legacy.length} separator${legacy.length === 1 ? "" : "s"}.`);
     }
     /**
      * @param {string} value
@@ -4712,109 +4819,49 @@ var plugins = (() => {
     }
     _injectCSS() {
       this.ui.injectCSS(`
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] {
-				position: relative !important;
-				display: block !important;
-				min-height: var(--plg-ss-height, 20px) !important;
-				height: var(--plg-ss-height, 20px) !important;
-				padding-left: 0 !important;
-				padding-right: 0 !important;
-				padding-top: 0 !important;
-				padding-bottom: 0 !important;
-				overflow: hidden !important;
-				cursor: grab;
-				color: var(--text-default, currentColor) !important;
-				font-size: 0 !important;
-				line-height: 0 !important;
+			/* Our own row. No native children to cloak \u2014 it just draws the line. */
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS} {
+				position: relative;
+				display: block;
+				box-sizing: border-box;
+				width: 100%;
+				flex: 0 0 auto;
+				min-height: var(--plg-ss-height, 20px);
+				height: var(--plg-ss-height, 20px);
+				margin: 0;
+				padding: 0;
+				overflow: hidden;
+				font-size: 0;
+				line-height: 0;
+				cursor: default;
+				color: var(--text-default, currentColor);
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"]:active,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"].plg-sidebar-separators-dragging {
-				cursor: grabbing;
+			/* Clickable only while the settings panel is open \u2014 that's when a click selects it. */
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}[data-plg-ss-selectable="1"] {
+				cursor: pointer;
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] > *,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] .sidebar-item-icon,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] .sidebar-item-name,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] .sidebar-item-title,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] .sidebar-item-text,
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"] .ti {
-				visibility: hidden !important;
-				opacity: 0 !important;
-				pointer-events: none !important;
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}:focus-visible {
+				outline: 2px solid var(--tps-accent, currentColor);
+				outline-offset: -2px;
 			}
 
-			.${ACTION_OVERLAY_CLASS} {
-				position: fixed !important;
-				z-index: 999999 !important;
-				display: inline-flex !important;
-				align-items: center !important;
-				gap: 4px !important;
-				padding: 6px 4px 6px 14px !important;
-				margin-left: -14px !important;
-				transform: translateY(-50%) !important;
-				pointer-events: auto !important;
-				background: transparent !important;
+			/* Mirrors the ring on the panel's list row, so it's obvious which separator the
+			   settings below are editing. */
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}[data-plg-sidebar-separators-active="1"] {
+				background: color-mix(in srgb, var(--tps-accent, currentColor) 12%, transparent);
+				box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--tps-accent, currentColor) 50%, transparent);
+				border-radius: 4px;
 			}
 
-			.${ACTION_OVERLAY_CLASS} .${ACTION_BUTTON_CLASS} {
-				display: inline-flex !important;
-				align-items: center !important;
-				justify-content: center !important;
-				width: 28px !important;
-				height: 28px !important;
-				padding: 0 !important;
-				border: 1px solid var(--input-border-color, color-mix(in srgb, currentColor 22%, transparent)) !important;
-				border-radius: 7px !important;
-				background: var(--tps-panel-bg, ${THEME_SURFACE_CSS}) !important;
-				color: var(--text-default, currentColor) !important;
-				font-size: 15px !important;
-				line-height: 1 !important;
-				visibility: visible !important;
-				opacity: 1 !important;
-				pointer-events: auto !important;
-				cursor: pointer !important;
-				transition: opacity 120ms ease-out, background-color 120ms ease-out, border-color 120ms ease-out;
+			/* While Thymer drags a real collection, get out of the way entirely so its
+			   drop hit-testing sees the sidebar exactly as it would without this plugin. */
+			body.${DRAG_HIDE_CLASS} ${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS} {
+				display: none !important;
 			}
 
-			.${ACTION_OVERLAY_CLASS} .${DELETE_BUTTON_CLASS} {
-				color: var(--tps-danger, #ef4444) !important;
-			}
-
-			@keyframes plgSidebarSeparatorsBreathe {
-				0%, 100% { box-shadow: 0 0 0 0 var(--logo-color, currentColor)); }
-				50%      { box-shadow: 0 0 0 4px transparent; }
-			}
-
-			.${ACTION_OVERLAY_CLASS}.is-active-editing .${EDIT_BUTTON_CLASS} {
-				border-color: var(--logo-color, currentColor)) !important;
-				color: var(--logo-color, currentColor)) !important;
-				animation: plgSidebarSeparatorsBreathe 1.6s ease-in-out infinite;
-			}
-
-			.${ACTION_OVERLAY_CLASS}.is-active-editing .${ACTION_BUTTON_CLASS}:hover {
-				background: color-mix(in srgb, var(--logo-color, currentColor)) 16%, var(--tps-panel-bg, ${THEME_SURFACE_CSS})) !important;
-			}
-
-			.${ACTION_OVERLAY_CLASS} .${ACTION_BUTTON_CLASS} .ti {
-				visibility: visible !important;
-				opacity: 1 !important;
-				pointer-events: none !important;
-				color: inherit !important;
-				font-size: inherit !important;
-			}
-
-			.${ACTION_OVERLAY_CLASS} .${ACTION_BUTTON_CLASS}:hover {
-				background: var(--hover-subtle, color-mix(in srgb, currentColor 8%, transparent)) !important;
-				border-color: var(--input-border-color, color-mix(in srgb, currentColor 32%, transparent)) !important;
-			}
-
-			.${ACTION_OVERLAY_CLASS} .${DELETE_BUTTON_CLASS}:hover {
-				background: color-mix(in srgb, var(--enum-red-fg, var(--tps-danger, #ef4444)) 16%, transparent) !important;
-				border-color: color-mix(in srgb, var(--enum-red-fg, var(--tps-danger, #ef4444)) 42%, transparent) !important;
-			}
-
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"]::after {
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}::after {
 				content: "";
 				display: block;
 				position: absolute;
@@ -4829,34 +4876,166 @@ var plugins = (() => {
 				transition: opacity 120ms ease-out, transform 120ms ease-out;
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"]:hover::after {
-				opacity: var(--plg-ss-opacity, 1);
-				transform: var(--plg-ss-hover-transform, translate(-50%, -50%) scaleX(1.02));
-			}
-
-			.${ACTION_OVERLAY_CLASS}.is-active-editing .${EDIT_BUTTON_CLASS} {
-				border-color: color-mix(in srgb, var(--tps-accent, currentColor) 55%, transparent) !important;
-				background: color-mix(in srgb, var(--tps-accent, currentColor) 18%, var(--tps-panel-bg, ${THEME_SURFACE_CSS})) !important;
-				color: var(--tps-accent, var(--text-default, currentColor)) !important;
-				animation: plg-sidebar-separators-edit-heartbeat 1600ms ease-in-out infinite;
-			}
-
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"].plg-sidebar-separators-dragging {
-				opacity: 0.58;
-			}
-
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-plg-sidebar-separators-style="gradient"]::after {
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}[data-plg-sidebar-separators-style="gradient"]::after {
 				border-top: 0;
 				height: max(var(--plg-ss-thickness, 1px), 1px);
 				background: var(--plg-ss-gradient);
 			}
 
-			.sidebar--icons ${COLLECTION_ROW_SELECTOR}[${MARK_ATTR}="1"][data-plg-sidebar-separators-style="double"]::after {
+			${SIDEBAR_LIST_SELECTOR} .${ROW_CLASS}[data-plg-sidebar-separators-style="double"]::after {
 				border-top: 0;
 				height: calc((var(--plg-ss-thickness, 1px) * 2) + var(--plg-ss-double-gap, 2px));
 				background:
 					linear-gradient(var(--plg-ss-color, currentColor) 0 0) top / 100% var(--plg-ss-thickness, 1px) no-repeat,
 					linear-gradient(var(--plg-ss-color, currentColor) 0 0) bottom / 100% var(--plg-ss-thickness, 1px) no-repeat;
+			}
+
+			/* \u2500\u2500 Separator list \u2014 the panel's spine \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */
+			.${PANEL_CLASS}__seplist {
+				display: flex;
+				flex-direction: column;
+				gap: 6px;
+				max-width: 1120px;
+			}
+
+			.${PANEL_CLASS}__seprow {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				padding: 4px 6px 4px 4px;
+				border: 1px solid var(--tps-border, color-mix(in srgb, currentColor 14%, transparent));
+				border-radius: 9px;
+				background: var(--tps-bg-input, transparent);
+			}
+
+			.${PANEL_CLASS}__seprow:hover {
+				border-color: var(--tps-border-strong, color-mix(in srgb, currentColor 26%, transparent));
+			}
+
+			/* The ring: this separator is what everything below edits. */
+			.${PANEL_CLASS}__seprow.is-active {
+				border-color: color-mix(in srgb, var(--tps-accent, currentColor) 60%, transparent);
+				background: color-mix(in srgb, var(--tps-accent, currentColor) 10%, transparent);
+				box-shadow: 0 0 0 1px color-mix(in srgb, var(--tps-accent, currentColor) 45%, transparent);
+			}
+
+			.${PANEL_CLASS}__seprow-main {
+				display: flex;
+				align-items: center;
+				gap: 12px;
+				flex: 1 1 auto;
+				min-width: 0;
+				padding: 6px 8px;
+				border: 0;
+				border-radius: 6px;
+				background: transparent;
+				color: var(--text-default, currentColor);
+				font: inherit;
+				text-align: left;
+				cursor: pointer;
+			}
+
+			.${PANEL_CLASS}__seprow-rail {
+				display: flex;
+				align-items: center;
+				justify-content: var(--plg-ss-justify, center);
+				flex: 0 0 auto;
+				width: 84px;
+				height: 20px;
+				padding-inline: 4px;
+				border-radius: 5px;
+				background: var(--panel-bg-color, var(--bg-default, rgba(127,127,127,0.06)));
+			}
+
+			.${PANEL_CLASS}__seprow-title {
+				flex: 1 1 auto;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+				white-space: nowrap;
+				font-size: 13px;
+				font-weight: 600;
+			}
+
+			.${PANEL_CLASS}__seprow.is-active .${PANEL_CLASS}__seprow-title {
+				color: var(--tps-accent, currentColor);
+			}
+
+			.${PANEL_CLASS}__seprow-actions {
+				display: inline-flex;
+				align-items: center;
+				gap: 4px;
+				flex: 0 0 auto;
+			}
+
+			.${PANEL_CLASS}__sepbtn {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 28px;
+				height: 28px;
+				padding: 0;
+				border: 1px solid var(--tps-border, color-mix(in srgb, currentColor 16%, transparent));
+				border-radius: 7px;
+				background: transparent;
+				color: var(--text-muted, color-mix(in srgb, currentColor 62%, transparent));
+				font-size: 15px;
+				line-height: 1;
+				cursor: pointer;
+			}
+
+			.${PANEL_CLASS}__sepbtn:hover:not(:disabled) {
+				background: var(--tps-bg-hover, color-mix(in srgb, currentColor 8%, transparent));
+				color: var(--text-default, currentColor);
+			}
+
+			.${PANEL_CLASS}__sepbtn:disabled {
+				opacity: 0.3;
+				cursor: default;
+			}
+
+			.${PANEL_CLASS}__sepbtn.is-danger {
+				color: var(--enum-red-fg, var(--tps-danger, #ef4444));
+			}
+
+			.${PANEL_CLASS}__sepbtn.is-danger:hover:not(:disabled) {
+				background: color-mix(in srgb, var(--enum-red-fg, var(--tps-danger, #ef4444)) 16%, transparent);
+				border-color: color-mix(in srgb, var(--enum-red-fg, var(--tps-danger, #ef4444)) 42%, transparent);
+			}
+
+			/* "Moves with" anchor picker in the settings panel. */
+			.${PANEL_CLASS}__anchor-row {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+				flex-wrap: wrap;
+			}
+
+			.${PANEL_CLASS}__anchor-btn {
+				display: inline-flex;
+				align-items: center;
+				height: 32px;
+				padding: 0 14px;
+				border: 1px solid var(--tps-border, color-mix(in srgb, currentColor 16%, transparent));
+				border-radius: 7px;
+				background: transparent;
+				color: var(--text-muted, color-mix(in srgb, currentColor 62%, transparent));
+				font: inherit;
+				font-size: 12px;
+				font-weight: 600;
+				cursor: pointer;
+				white-space: nowrap;
+			}
+
+			.${PANEL_CLASS}__anchor-btn:hover {
+				background: var(--tps-bg-hover, color-mix(in srgb, currentColor 6%, transparent));
+				color: var(--text-default, currentColor);
+			}
+
+			.${PANEL_CLASS}__anchor-btn.is-active {
+				border-color: color-mix(in srgb, var(--tps-accent, currentColor) 55%, transparent);
+				background: color-mix(in srgb, var(--tps-accent, currentColor) 14%, transparent);
+				color: var(--tps-accent, currentColor);
 			}
 
 			.${PANEL_CLASS}__editor-card,
@@ -5236,7 +5415,27 @@ var plugins = (() => {
 				margin: 0;
 				font-size: 12px;
 				line-height: 1.45;
-				color: var(--text-muted, color-mix(in srgb, currentColor 62%, transparent));
+				/* Same treatment as the header's INSTRUCTIONS label (see
+				   .tps-plugin-header-helper-toggle in shared/settings-ui/components.css), so all
+				   secondary copy in the panel reads at one weight. Thymer never defines
+				   --text-muted, so the old fallback landed close to body text on a dark panel. */
+				color: inherit;
+				opacity: 0.28;
+			}
+
+			/* Inside a section the container is already the full 1120px \u2014 the 520px measure cap
+			   just wraps the line early and leaves a dead gutter. (Kept on the centered
+			   empty-state copy, where a reading measure IS the right call.) */
+			.${PANEL_CLASS} .tps-section .${PANEL_CLASS}__helper {
+				max-width: none;
+			}
+
+			.${PANEL_CLASS} .tps-section .${PANEL_CLASS}__helper + .${PANEL_CLASS}__helper {
+				margin-top: 4px;
+			}
+
+			.${PANEL_CLASS}__helper + .${PANEL_CLASS}__anchor-row {
+				margin-top: 10px;
 			}
 
 			.${PANEL_CLASS}__line {
@@ -5981,26 +6180,6 @@ var plugins = (() => {
 				flex-wrap: wrap;
 			}
 
-			.plg-sidebar-separators-hold {
-				position: fixed;
-				left: 50%;
-				bottom: 24px;
-				z-index: 999999;
-				transform: translateX(-50%);
-				padding: 7px 11px;
-				border-radius: 999px;
-				border: 1px solid var(--input-border-color, color-mix(in srgb, currentColor 22%, transparent));
-				background:
-					linear-gradient(90deg, var(--tps-accent, currentColor) 0 0) 0 100% / 0% 2px no-repeat,
-					var(--tps-panel-bg, ${THEME_SURFACE_CSS});
-				color: var(--text-default, currentColor);
-				font: inherit;
-				font-size: 12px;
-				line-height: 1;
-				pointer-events: none;
-				animation: plg-sidebar-separators-hold-fill ${OUTSIDE_HOLD_MS}ms linear forwards;
-			}
-
 			.plg-sidebar-separators-poof {
 				position: fixed;
 				z-index: 999999;
@@ -6023,10 +6202,6 @@ var plugins = (() => {
 				animation: plg-sidebar-separators-poof 620ms cubic-bezier(0.15, 0.8, 0.2, 1) forwards;
 			}
 
-			@keyframes plg-sidebar-separators-hold-fill {
-				to { background-size: 100% 2px, auto; }
-			}
-
 			@keyframes plg-sidebar-separators-poof {
 				65% {
 					opacity: 0.8;
@@ -6038,19 +6213,8 @@ var plugins = (() => {
 				}
 			}
 
-			@keyframes plg-sidebar-separators-edit-heartbeat {
-				0%, 100% {
-					background: color-mix(in srgb, var(--tps-accent, currentColor) 16%, var(--tps-panel-bg, ${THEME_SURFACE_CSS}));
-					box-shadow: 0 0 0 0 color-mix(in srgb, var(--tps-accent, currentColor) 0%, transparent);
-				}
-				50% {
-					background: color-mix(in srgb, var(--tps-accent, currentColor) 28%, var(--tps-panel-bg, ${THEME_SURFACE_CSS}));
-					box-shadow: 0 0 0 3px color-mix(in srgb, var(--tps-accent, currentColor) 18%, transparent);
-				}
-			}
 
 			@media (prefers-reduced-motion: reduce) {
-				.plg-sidebar-separators-hold,
 				.plg-sidebar-separators-poof span {
 					animation-duration: 1ms;
 				}
