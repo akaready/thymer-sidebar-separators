@@ -3492,7 +3492,7 @@ ${report}
   __name(pingActive, "pingActive");
 
   // plugin.js
-  var PLUGIN_VERSION = "2.1.7";
+  var PLUGIN_VERSION = "2.1.8";
   var PLUGIN_KEY = "sidebarSeparators";
   var MARK_ATTR = "data-plg-sidebar-separator";
   var SCHEMA_VERSION = 2;
