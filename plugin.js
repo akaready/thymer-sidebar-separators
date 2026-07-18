@@ -3273,6 +3273,49 @@ ${report}
   __name(renderedToHex, "renderedToHex");
 
   // ../../shared/plugin-version.js
+  var CONFIG_WRITE_QUEUES_KEY = "__tpsPluginConfigWriteQueues";
+  function configWriteIdentity(plugin) {
+    let workspace = "default";
+    try {
+      workspace = plugin.getWorkspaceGuid?.() || "default";
+    } catch {
+    }
+    let guid = "";
+    try {
+      guid = plugin.getGuid?.() || plugin.collection?.getGuid?.() || "";
+    } catch {
+    }
+    let name = "plugin";
+    try {
+      name = plugin.getConfiguration?.()?.name || "plugin";
+    } catch {
+    }
+    return `${workspace}/${guid || name}`;
+  }
+  __name(configWriteIdentity, "configWriteIdentity");
+  function queuePluginConfigWrite(plugin, task) {
+    let queues;
+    try {
+      const root = (
+        /** @type {any} */
+        globalThis
+      );
+      if (!(root[CONFIG_WRITE_QUEUES_KEY] instanceof Map)) root[CONFIG_WRITE_QUEUES_KEY] = /* @__PURE__ */ new Map();
+      queues = root[CONFIG_WRITE_QUEUES_KEY];
+    } catch {
+      return Promise.resolve().then(task);
+    }
+    const key = configWriteIdentity(plugin);
+    const prior = queues.get(key) || Promise.resolve();
+    const result = prior.then(task, task);
+    const tail = result.then(() => void 0, () => void 0);
+    queues.set(key, tail);
+    void tail.then(() => {
+      if (queues.get(key) === tail) queues.delete(key);
+    });
+    return result;
+  }
+  __name(queuePluginConfigWrite, "queuePluginConfigWrite");
   function readPluginVersion(conf, fallback = "0.0.1") {
     if (!conf || typeof conf !== "object") return fallback;
     if (typeof conf.version === "string" && conf.version) return conf.version;
@@ -3327,6 +3370,10 @@ ${report}
   }
   __name(resolveConfigApi, "resolveConfigApi");
   async function syncPluginVersionOnLoad(plugin, pluginVersion, customPatch = {}) {
+    return queuePluginConfigWrite(plugin, () => syncPluginVersionOnLoadNow(plugin, pluginVersion, customPatch));
+  }
+  __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
+  async function syncPluginVersionOnLoadNow(plugin, pluginVersion, customPatch = {}) {
     const api = await resolveConfigApi(plugin);
     if (!api) return;
     let conf = {};
@@ -3355,7 +3402,7 @@ ${report}
     } catch {
     }
   }
-  __name(syncPluginVersionOnLoad, "syncPluginVersionOnLoad");
+  __name(syncPluginVersionOnLoadNow, "syncPluginVersionOnLoadNow");
 
   // ../../shared/plugin-kill-switch.js
   var MARKER_SYNC_HORIZON_MS = 9e4;
@@ -3421,6 +3468,38 @@ ${report}
     return confDisabled;
   }
   __name(readKillSwitch, "readKillSwitch");
+  async function setPluginDisabled(plugin, disabled, pluginVersion, customPatch = {}) {
+    return queuePluginConfigWrite(plugin, () => setPluginDisabledNow(plugin, disabled, pluginVersion, customPatch));
+  }
+  __name(setPluginDisabled, "setPluginDisabled");
+  async function setPluginDisabledNow(plugin, disabled, pluginVersion, customPatch) {
+    const api = await resolveConfigApi(plugin);
+    if (!api) return false;
+    let conf = {};
+    try {
+      conf = api.getConfiguration?.() || plugin.getConfiguration?.() || {};
+    } catch {
+      return false;
+    }
+    if (typeof conf.name !== "string" || !conf.name.trim()) return false;
+    const custom = conf.custom && typeof conf.custom === "object" ? (
+      /** @type {Record<string, unknown>} */
+      conf.custom
+    ) : {};
+    const resolvedPatch = typeof customPatch === "function" ? customPatch(custom) : customPatch;
+    const patch = resolvedPatch && typeof resolvedPatch === "object" ? resolvedPatch : {};
+    if (!Object.keys(patch).length && readKillSwitch(plugin) === disabled && isPluginDisabled(conf) === disabled) return true;
+    writeKillSwitchMarker(plugin, disabled);
+    try {
+      const result = await api.saveConfiguration(configWithPluginVersion(conf, { ...patch, pluginDisabled: disabled }, pluginVersion));
+      if (result === false) throw new Error("Thymer rejected the config save.");
+      return true;
+    } catch {
+      clearKillSwitchMarker(plugin);
+      return false;
+    }
+  }
+  __name(setPluginDisabledNow, "setPluginDisabledNow");
 
   // ../../shared/telemetry/ping.js
   var TELEMETRY_ENDPOINT = "https://thymer-plugins.goatcounter.com/count";
@@ -3492,10 +3571,10 @@ ${report}
   __name(pingActive, "pingActive");
 
   // plugin.js
-  var PLUGIN_VERSION = "2.1.8";
+  var PLUGIN_VERSION = "2.1.9";
   var PLUGIN_KEY = "sidebarSeparators";
   var MARK_ATTR = "data-plg-sidebar-separator";
-  var SCHEMA_VERSION = 2;
+  var SCHEMA_VERSION = 3;
   var LEGACY_PLUGIN_KEY = "sidebarSeperators";
   var LEGACY_MARK_ATTR = "data-plg-sidebar-seperator";
   var PANEL_CLASS = "plg-sidebar-separators-panel";
@@ -3724,12 +3803,14 @@ ${report}
     _collNames = /* @__PURE__ */ new Map();
     /** @type {string} snapshot of the collection list; a change re-renders the panel */
     _collSnapshot = "";
-    /** @type {number} monotonic revision; localStorage vs config reconciliation */
+    /** @type {number} monotonic revision for the complete workspace state journal */
     _rev = 0;
     /** @type {ReturnType<typeof setTimeout> | null} */
     _configCommitTimer = null;
     /** @type {boolean} */
     _migrationRan = false;
+    /** @type {boolean} */
+    _unloading = false;
     /** @type {Promise<void> | null} resolves once syncPluginVersionOnLoad has finished writing */
     _versionSynced = null;
     /** @type {boolean} re-entrancy guard for our own sidebar DOM writes */
@@ -3772,6 +3853,7 @@ ${report}
       pingInstall("sidebar-separators");
       pingActive("sidebar-separators");
       this._disabled = readKillSwitch(this);
+      this._unloading = false;
       this._defaultStyle = this._normalizeStyle(DEFAULT_STYLE);
       this._activeOverrideId = null;
       this._editingPresetId = null;
@@ -3844,6 +3926,7 @@ ${report}
       this._syncSeparatorRows();
     }
     onUnload() {
+      this._unloading = true;
       if (this._settingsCommand) {
         this._settingsCommand.remove();
         this._settingsCommand = null;
@@ -4469,10 +4552,7 @@ ${report}
     /** @param {string[]} list */
     _saveCustomSwatches(list) {
       this._customSwatches = Array.isArray(list) ? list.filter((s) => this._isHex(s)).slice(0, 44) : [];
-      try {
-        localStorage.setItem(this._customSwatchesKey(), JSON.stringify(this._customSwatches));
-      } catch {
-      }
+      this._saveState();
     }
     /** Re-render runtime style when the user switches light/dark (for `twflip:`). */
     _watchAppearance() {
@@ -4688,14 +4768,20 @@ ${report}
         collapsedStyle: this._normalizeStyle(raw.collapsedStyle || raw.style)
       };
     }
-    /** Read separators from the higher-`rev` of {plugin config, localStorage}. */
+    /** Read complete state from the higher-`rev` of {plugin config, localStorage}. */
     _loadSeparators() {
       let confBlob = null;
       try {
         const conf = this.getConfiguration ? this.getConfiguration() : null;
         const custom = conf && conf.custom && typeof conf.custom === "object" ? conf.custom : null;
-        if (custom && Array.isArray(custom.separators)) {
-          confBlob = { rev: Number(custom.rev) || 0, separators: custom.separators };
+        if (custom && (Number(custom.schemaVersion) >= SCHEMA_VERSION || Array.isArray(custom.separators) || Array.isArray(custom.sidebarSeparatorPresets) || Array.isArray(custom.sidebarSeperatorPresets) || Array.isArray(custom.sidebarSeparatorCustomSwatches))) {
+          confBlob = {
+            schemaVersion: Number(custom.schemaVersion) || 0,
+            rev: Number(custom.rev) || 0,
+            separators: Array.isArray(custom.separators) ? custom.separators : [],
+            presets: Array.isArray(custom.sidebarSeparatorPresets) ? custom.sidebarSeparatorPresets : Array.isArray(custom.sidebarSeperatorPresets) ? custom.sidebarSeperatorPresets : [],
+            customSwatches: Array.isArray(custom.sidebarSeparatorCustomSwatches) ? custom.sidebarSeparatorCustomSwatches : []
+          };
         }
       } catch {
       }
@@ -4705,12 +4791,28 @@ ${report}
         if (stored) {
           const parsed = JSON.parse(stored);
           if (parsed && Array.isArray(parsed.separators)) {
-            localBlob = { rev: Number(parsed.rev) || 0, separators: parsed.separators };
+            const isUnified = Number(parsed.schemaVersion) >= SCHEMA_VERSION;
+            localBlob = {
+              schemaVersion: Number(parsed.schemaVersion) || 0,
+              rev: Number(parsed.rev) || 0,
+              separators: parsed.separators,
+              presets: isUnified && Array.isArray(parsed.presets) ? parsed.presets : this._presets,
+              customSwatches: isUnified && Array.isArray(parsed.customSwatches) ? parsed.customSwatches : this._customSwatches
+            };
           }
         }
       } catch {
       }
-      const pick = !confBlob && !localBlob ? null : !confBlob ? localBlob : !localBlob ? confBlob : localBlob.rev > confBlob.rev ? localBlob : confBlob;
+      if (!localBlob && (this._presets.length || this._customSwatches.length)) {
+        localBlob = {
+          schemaVersion: 0,
+          rev: 0,
+          separators: [],
+          presets: this._presets,
+          customSwatches: this._customSwatches
+        };
+      }
+      const pick = !confBlob && !localBlob ? null : !confBlob ? localBlob : !localBlob ? confBlob : localBlob.rev > confBlob.rev || localBlob.rev === confBlob.rev && Number(confBlob.schemaVersion) < SCHEMA_VERSION && (localBlob.presets?.length || localBlob.customSwatches?.length) ? localBlob : confBlob;
       this._separators = /* @__PURE__ */ new Map();
       this._rev = pick ? Number(pick.rev) || 0 : 0;
       if (pick) {
@@ -4718,9 +4820,12 @@ ${report}
           const sep = this._normalizeSeparator(raw);
           if (sep) this._separators.set(sep.id, sep);
         }
+        this._presets = Array.isArray(pick.presets) ? pick.presets.map((p) => this._normalizePreset(p)).filter(Boolean) : [];
+        this._customSwatches = Array.isArray(pick.customSwatches) ? pick.customSwatches.filter((s) => this._isHex(s)).map((s) => s.toLowerCase()).slice(0, 44) : [];
       }
       const confRev = confBlob ? Number(confBlob.rev) || 0 : -1;
-      if (this._separators.size && confRev < this._rev) this._scheduleConfigCommit();
+      const needsSchemaUpgrade = Number(pick?.schemaVersion) < SCHEMA_VERSION && (this._separators.size > 0 || this._presets.length > 0 || this._customSwatches.length > 0);
+      if (confRev < this._rev || needsSchemaUpgrade) this._scheduleConfigCommit();
     }
     /** @returns {any[]} */
     _serializeSeparators() {
@@ -4734,17 +4839,34 @@ ${report}
         collapsedStyle: s.collapsedStyle
       }));
     }
-    /** Instant local write + a deferred config commit. Call after ANY separator mutation. */
-    _saveSeparators() {
+    /** Complete local crash journal; config remains the cross-device source of truth. */
+    _writeLocalState() {
+      try {
+        localStorage.setItem(this._storeKey(), JSON.stringify({
+          schemaVersion: SCHEMA_VERSION,
+          rev: this._rev,
+          separators: this._serializeSeparators(),
+          presets: this._presets,
+          customSwatches: this._customSwatches
+        }));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    /** Journal any state mutation immediately, then schedule one synced commit. */
+    _saveState() {
       if (!this._isOwnWorkspace()) return;
       this._rev += 1;
-      try {
-        localStorage.setItem(this._storeKey(), JSON.stringify({ rev: this._rev, separators: this._serializeSeparators() }));
-      } catch {
-      }
+      this._writeLocalState();
       this._scheduleConfigCommit();
     }
+    /** Instant local write + a deferred config commit. Call after ANY separator mutation. */
+    _saveSeparators() {
+      this._saveState();
+    }
     _scheduleConfigCommit() {
+      if (this._unloading) return;
       if (this._configCommitTimer) clearTimeout(this._configCommitTimer);
       this._configCommitTimer = setTimeout(() => {
         this._configCommitTimer = null;
@@ -4794,51 +4916,103 @@ ${report}
               clearTimeout(this._configCommitTimer);
               this._configCommitTimer = null;
             }
-            writeKillSwitchMarker(this, !nextOn);
-            void this._commitToConfig({ pluginDisabled: !nextOn });
+            const revisionAtStart = this._rev;
+            let savedRev = this._rev;
+            void setPluginDisabled(this, !nextOn, PLUGIN_VERSION, (custom) => {
+              const built = this._buildStatePatch(custom);
+              savedRev = built.rev;
+              return built.patch;
+            }).then((ok) => {
+              if (!ok) {
+                this._scheduleConfigCommit();
+                return;
+              }
+              if (this._rev === revisionAtStart) {
+                this._rev = savedRev;
+                this._writeLocalState();
+              } else {
+                this._rev = Math.max(this._rev, savedRev + 1);
+                this._writeLocalState();
+                this._scheduleConfigCommit();
+              }
+            });
           }, "onToggle")
         },
         feedback: { data: this.data }
       };
     }
+    /**
+     * Build the complete synced state patch from a fresh custom snapshot.
+     * @param {Record<string, any>} custom
+     * @param {Record<string, any>} [extra]
+     */
+    _buildStatePatch(custom, extra = {}) {
+      const rev = Math.max(this._rev, (Number(custom.rev) || 0) + 1);
+      return {
+        rev,
+        patch: {
+          ...extra,
+          schemaVersion: SCHEMA_VERSION,
+          rev,
+          separators: this._serializeSeparators(),
+          sidebarSeparatorPresets: this._presets,
+          sidebarSeparatorCustomSwatches: this._customSwatches
+        }
+      };
+    }
     async _commitToConfig(extra = {}) {
-      if (!this._isOwnWorkspace()) return;
-      const handle = this._selfPluginHandle();
-      if (!handle) return;
       if (this._versionSynced) {
         try {
           await this._versionSynced;
         } catch {
         }
       }
+      return queuePluginConfigWrite(this, () => this._commitToConfigNow(extra));
+    }
+    async _commitToConfigNow(extra = {}) {
+      if (!this._isOwnWorkspace()) return false;
+      const handle = this._selfPluginHandle();
+      if (!handle) return false;
       let conf = {};
       try {
         conf = handle.getConfiguration ? handle.getConfiguration() : this.getConfiguration?.() || {};
       } catch {
-        return;
+        return false;
       }
-      if (typeof conf.name !== "string" || !conf.name.trim()) return;
+      if (typeof conf.name !== "string" || !conf.name.trim()) return false;
       const custom = conf.custom && typeof conf.custom === "object" ? conf.custom : {};
-      const nextRev = Math.max(this._rev, (Number(custom.rev) || 0) + 1);
-      this._rev = nextRev;
+      const revisionAtStart = this._rev;
+      const built = this._buildStatePatch(custom, extra);
       try {
-        await handle.saveConfiguration({
+        const result = await handle.saveConfiguration({
           ...conf,
           version: PLUGIN_VERSION,
           custom: {
             ...custom,
-            ...extra,
-            pluginVersion: PLUGIN_VERSION,
-            schemaVersion: SCHEMA_VERSION,
-            rev: nextRev,
-            separators: this._serializeSeparators()
+            ...built.patch,
+            pluginVersion: PLUGIN_VERSION
           }
         });
+        if (result === false) throw new Error("Thymer rejected the config save.");
+        if (this._rev === revisionAtStart) {
+          this._rev = built.rev;
+          this._writeLocalState();
+        } else {
+          this._rev = Math.max(this._rev, built.rev + 1);
+          this._writeLocalState();
+          this._scheduleConfigCommit();
+        }
         try {
-          localStorage.setItem(this._storeKey(), JSON.stringify({ rev: nextRev, separators: this._serializeSeparators() }));
+          localStorage.removeItem(this._presetsKey());
+          localStorage.removeItem(this._legacyPresetsKey());
+          localStorage.removeItem(this._customSwatchesKey());
+          localStorage.removeItem(this._legacyCustomSwatchesKey());
         } catch {
         }
+        return true;
       } catch {
+        this._scheduleConfigCommit();
+        return false;
       }
     }
     /* ── Presets ─────────────────────────────────────────────────────────── */
@@ -4908,17 +5082,10 @@ ${report}
       return this._presets.find((p) => p.id === id) || null;
     }
     /**
-     * Persist presets to workspace-keyed localStorage ONLY. We deliberately do NOT
-     * write them to the plugin config here: `this.saveConfiguration` reloads the
-     * whole plugin, which orphans the open settings panel and makes preset actions
-     * only appear after a manual refresh. localStorage survives reopens/restarts;
-     * cross-device sync is intentionally deferred to avoid that reload.
+     * Presets use the same unified journal and synced commit as separators.
      */
     _savePresets() {
-      try {
-        localStorage.setItem(this._presetsKey(), JSON.stringify(this._presets));
-      } catch {
-      }
+      this._saveState();
     }
     /** "Set preset" — snapshot the selected separator's current look (or defaults) as a new preset, then open it for editing. */
     _startNewPreset() {
